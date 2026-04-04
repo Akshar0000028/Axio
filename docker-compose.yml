@@ -1,0 +1,43 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - axio-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  axio:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - backend/.env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - ENV=production
+      - AXIO_API_KEY=${AXIO_API_KEY:-}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+    volumes:
+      - axio-data:/app/backend/data
+      - axio-exports:/app/backend/exports
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  axio-data:
+  axio-exports:
+  axio-redis:
