@@ -3,6 +3,8 @@ import uuid
 import json
 import logging
 import asyncio
+import secrets
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from datetime import datetime, timedelta
@@ -11,6 +13,7 @@ import pandas as pd
 import numpy as np
 import joblib
 
+from werkzeug.utils import secure_filename
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -30,6 +33,9 @@ from .schemas import (
 from .pipeline import analyze_dataset_pipeline, train_pipeline
 from .ml_agent import generate_chat_response
 from .session_store import SessionStore
+from .database import init_db, save_message, get_history, get_sessions
+
+init_db()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,7 +105,7 @@ async def verify_api_key(api_key: str = Depends(API_KEY_HEADER)):
     """Require X-API-Key header when AXIO_API_KEY is set in env."""
     if not AXIO_API_KEY:
         return  # Key not configured — open (dev convenience)
-    if api_key != AXIO_API_KEY:
+    if not secrets.compare_digest(api_key, AXIO_API_KEY):
         raise HTTPException(
             status_code=401,
             detail="Invalid or missing API key. Set X-API-Key header.",
@@ -162,7 +168,7 @@ async def upload_dataset(request: Request, file: UploadFile = File(...)):
         raise HTTPException(status_code=415, detail=f"Unsupported file type '{ext}'.")
 
     session_id = str(uuid.uuid4())
-    safe_name = "".join(c for c in (file.filename or "upload") if c.isalnum() or c in ".-_")
+    safe_name = secure_filename(file.filename or "upload")
     filepath = os.path.join(DATA_DIR, f"{session_id}_{safe_name}")
 
     content = await file.read()
@@ -212,23 +218,46 @@ async def upload_dataset(request: Request, file: UploadFile = File(...)):
 @limiter.limit("60/minute")
 def chat_endpoint(request: Request, req: ChatRequest):
     context = store.get(req.session_id) or {}
-    return generate_chat_response(req.message, req.history, context)
+    
+    # Save user message
+    session_label = context.get("filename", "New Conversation")
+    save_message(req.session_id, "user", req.message, session_label=session_label)
+    
+    response = generate_chat_response(req.message, req.history, context)
+    
+    # Save assistant message
+    metrics_dicts = [{"label": m.label, "value": m.value, "delta": m.delta} for m in response.metrics]
+    save_message(req.session_id, "assistant", response.content, actions=response.actions, metrics=metrics_dicts, session_label=session_label)
+    
+    return response
+
+@app.get("/chat/sessions", tags=["ai"], dependencies=[Depends(verify_api_key)])
+def list_sessions():
+    return get_sessions()
+
+@app.get("/chat/history/{session_id}", tags=["ai"], dependencies=[Depends(verify_api_key)])
+def get_session_history(session_id: str):
+    return get_history(session_id)
 
 
 @app.post("/train", tags=["ml"], dependencies=[Depends(verify_api_key)])
 @limiter.limit("10/minute")
-def train_model(request: Request, req: TrainRequest):
+async def train_model(request: Request, req: TrainRequest):
     session = _get_session(req.session_id)
     df = _read_dataframe(session["filepath"])
     try:
-        result = train_pipeline(
-            session_id=req.session_id,
-            df=df,
-            target_column=req.target_column,
-            model_key=req.model_key,
-            test_size=req.test_size,
-            cross_validate=req.cross_validate,
-            n_cv_folds=req.n_cv_folds,
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            _executor,
+            lambda: train_pipeline(
+                session_id=req.session_id,
+                df=df,
+                target_column=req.target_column,
+                model_key=req.model_key,
+                test_size=req.test_size,
+                cross_validate=req.cross_validate,
+                n_cv_folds=req.n_cv_folds,
+            )
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -306,6 +335,12 @@ def delete_session(session_id: str):
                 os.remove(fp)
         except OSError:
             pass
+    try:
+        exp_dir = _exports_dir(session_id)
+        if os.path.exists(exp_dir):
+            shutil.rmtree(exp_dir, ignore_errors=True)
+    except OSError:
+        pass
     return {"deleted": session_id, "found": session is not None}
 
 

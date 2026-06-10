@@ -161,6 +161,20 @@ export function getExportUrl(type, sessionId) {
 }
 
 /**
+ * Fetch past chat sessions.
+ */
+export async function getChatSessions() {
+  return apiFetch('/chat/sessions');
+}
+
+/**
+ * Fetch chat history for a given session.
+ */
+export async function getChatHistory(sessionId) {
+  return apiFetch(`/chat/history/${sessionId}`);
+}
+
+/**
  * Health check — resolves true if backend is reachable.
  */
 export async function healthCheck() {

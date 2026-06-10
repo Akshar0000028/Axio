@@ -1,5 +1,6 @@
 import os
 import json
+import json_repair
 import logging
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -211,7 +212,7 @@ def generate_chat_response(
         json_str = raw[start: end + 1] if start != -1 and end >= start else raw
 
         try:
-            parsed = json.loads(json_str)
+            parsed = json_repair.loads(json_str)
 
             # Fix double-escaped newlines that some models emit
             content = parsed.get("content", "")

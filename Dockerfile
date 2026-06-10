@@ -17,6 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libgomp1 curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Create a non-root user
+RUN useradd -m appuser
+
 # Python deps
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -29,6 +32,12 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
 # Runtime dirs
 RUN mkdir -p backend/data backend/exports
+
+# Change ownership to non-root user
+RUN chown -R appuser:appuser backend/data backend/exports
+
+# Switch to non-root user
+USER appuser
 
 ENV ENV=production
 ENV PORT=8000

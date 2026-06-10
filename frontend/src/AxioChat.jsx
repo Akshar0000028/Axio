@@ -5,7 +5,7 @@ import {
   Zap, Database, FlaskConical, ArrowLeft, Sparkles
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { uploadDataset, sendChatMessage, trainModel, getExportUrl } from './api';
+import { uploadDataset, sendChatMessage, trainModel, getExportUrl, getChatSessions, getChatHistory } from './api';
 
 const QUICK_PROMPTS = [
   { icon: '🤖', label: 'Train a model on my dataset' },
@@ -440,7 +440,7 @@ export default function AxioChat({ onBack }) {
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-  const [conversations] = useState([{ id: 1, label: 'New conversation' }]);
+  const [conversations, setConversations] = useState([]);
   const bottomRef = useRef(null);
   const fileInputRef = useRef(null);
   const textareaRef = useRef(null);
@@ -449,6 +449,35 @@ export default function AxioChat({ onBack }) {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    const loadSessions = async () => {
+      try {
+        const sessions = await getChatSessions();
+        setConversations(sessions);
+      } catch (err) {
+        console.error("Failed to load sessions:", err);
+      }
+    };
+    loadSessions();
+  }, []);
+
+  const loadSessionHistory = async (sessionMeta) => {
+    try {
+      const history = await getChatHistory(sessionMeta.session_id);
+      const formattedMessages = history.map(h => ({
+        id: h.id,
+        role: h.role,
+        content: h.content,
+        actions: h.actions,
+        metrics: h.metrics,
+      }));
+      setMessages(formattedMessages);
+      setSession({ session_id: sessionMeta.session_id, filename: sessionMeta.label });
+    } catch (err) {
+      console.error("Failed to load history:", err);
+    }
+  };
 
   const addMessage = (msg) => {
     const id = Date.now() + Math.random();
@@ -500,6 +529,13 @@ export default function AxioChat({ onBack }) {
         showTrainCard: false,
         onTrainClick: null,
       });
+
+      // Refresh sessions
+      try {
+        const sessions = await getChatSessions();
+        setConversations(sessions);
+      } catch (e) {}
+
     } catch (err) {
       updateMessage(uploadId, { done: true });
       addMessage({ role: 'assistant', content: `⚠️ Upload failed: ${err.message}` });
@@ -622,15 +658,20 @@ export default function AxioChat({ onBack }) {
         <div style={{ marginBottom: 20 }}>
           <p style={{ fontSize: 10, fontWeight: 700, color: 'rgba(255,255,255,0.3)', letterSpacing: '0.08em', textTransform: 'uppercase', padding: '0 4px', marginBottom: 6 }}>RECENT</p>
           {conversations.map(c => (
-            <div key={c.id} style={{
+            <div key={c.session_id} onClick={() => loadSessionHistory(c)} style={{
               display: 'flex', alignItems: 'center', gap: 8,
               padding: '8px 10px', borderRadius: 8, cursor: 'pointer',
-              background: 'rgba(79,140,255,0.1)', border: '1px solid rgba(79,140,255,0.15)',
+              background: session?.session_id === c.session_id ? 'rgba(79,140,255,0.2)' : 'rgba(79,140,255,0.05)',
+              border: '1px solid rgba(79,140,255,0.15)',
+              marginBottom: 4,
             }}>
               <MessageSquare size={13} color="#4f8cff" />
               <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.75)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.label}</span>
             </div>
           ))}
+          {conversations.length === 0 && (
+            <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', padding: '0 4px' }}>No recent chats</div>
+          )}
         </div>
 
         {/* Quick Prompts */}

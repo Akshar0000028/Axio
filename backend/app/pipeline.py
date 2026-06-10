@@ -4,6 +4,7 @@ import numpy as np
 import joblib
 import os
 import logging
+import gc
 from typing import Optional
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
@@ -147,7 +148,14 @@ def _coerce_dtypes(X: pd.DataFrame) -> pd.DataFrame:
 def _build_preprocessor(X: pd.DataFrame):
     """Build a ColumnTransformer that handles numeric and categorical features."""
     numeric_features = X.select_dtypes(include=["number"]).columns.tolist()
-    categorical_features = X.select_dtypes(include=["object", "category"]).columns.tolist()
+    all_categorical_features = X.select_dtypes(include=["object", "category"]).columns.tolist()
+
+    categorical_features = []
+    for col in all_categorical_features:
+        if X[col].nunique() <= 100:
+            categorical_features.append(col)
+        else:
+            logger.info(f"Dropping high cardinality categorical feature: {col} (>100 unique values)")
 
     transformers = []
 
@@ -208,12 +216,6 @@ def train_pipeline(
     # Coerce dtypes: bool → int, fully-numeric objects → float
     X = _coerce_dtypes(X)
 
-    # Drop columns with >80% missing
-    high_missing = [c for c in X.columns if X[c].isnull().mean() > 0.8]
-    if high_missing:
-        logger.info(f"Dropping high-missing columns (>80%): {high_missing}")
-        X = X.drop(columns=high_missing)
-
     problem_type = _infer_problem_type(y)
     model_key = model_key or "random_forest"
 
@@ -223,8 +225,22 @@ def train_pipeline(
         label_encoder = LabelEncoder()
         y = pd.Series(label_encoder.fit_transform(y.astype(str)), index=y.index)
 
+    # ── Train/test split ───────────────────────────────────────────────────
+    stratify = y if problem_type == "classification" and y.nunique() <= 20 else None
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, random_state=42, stratify=stratify
+    )
+
+    # Drop columns with >80% missing (based on X_train to prevent data leakage)
+    high_missing = [c for c in X_train.columns if X_train[c].isnull().mean() > 0.8]
+    if high_missing:
+        logger.info(f"Dropping high-missing columns (>80%): {high_missing}")
+        X_train = X_train.drop(columns=high_missing)
+        X_test = X_test.drop(columns=high_missing)
+        X = X.drop(columns=high_missing)  # for cv_scores later
+
     # ── Build pipeline ─────────────────────────────────────────────────────
-    preprocessor, numeric_features, categorical_features = _build_preprocessor(X)
+    preprocessor, numeric_features, categorical_features = _build_preprocessor(X_train)
 
     if problem_type == "classification":
         model_factory = CLASSIFIERS.get(model_key, CLASSIFIERS["random_forest"])
@@ -237,12 +253,6 @@ def train_pipeline(
         ("preprocessor", preprocessor),
         ("model", model_instance),
     ])
-
-    # ── Train/test split ───────────────────────────────────────────────────
-    stratify = y if problem_type == "classification" and y.nunique() <= 20 else None
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=42, stratify=stratify
-    )
 
     t0 = time.perf_counter()
     clf.fit(X_train, y_train)
@@ -306,6 +316,14 @@ def train_pipeline(
             metrics.feature_importance = dict(
                 sorted(fi_dict.items(), key=lambda x: x[1], reverse=True)[:10]
             )
+
+    # ── Cleanup ────────────────────────────────────────────────────────────
+    del df
+    del X
+    del y
+    del X_train
+    del X_test
+    gc.collect()
 
     return {
         "model_name": model_key,
