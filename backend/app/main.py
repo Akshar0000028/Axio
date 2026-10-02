@@ -28,14 +28,20 @@ from slowapi.errors import RateLimitExceeded
 from .schemas import (
     AnalyzeResponse, TrainRequest, TrainResponse,
     PredictRequest, PredictResponse,
-    ChatRequest, ChatResponse,
+    ChatRequest, ChatResponse, ChartDisplay, MetricDisplay, ProjectCreate, ProjectResponse, DatasetResponse, RunResponse,
 )
 from .pipeline import analyze_dataset_pipeline, train_pipeline
 from .ml_agent import generate_chat_response
+from .agents import build_agent_run
 from .session_store import SessionStore
 from .database import init_db, save_message, get_history, get_sessions
+from .platform_store import (
+    init_platform_db, list_projects, create_project, get_project,
+    register_dataset, list_datasets, get_dataset_by_session, register_run, list_runs,
+)
 
 init_db()
+init_platform_db()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,8 +66,8 @@ ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "50"))
 
 BASE_DIR = os.path.dirname(__file__)
-DATA_DIR = os.path.join(BASE_DIR, "..", "data")
-EXPORTS_DIR = os.path.join(BASE_DIR, "..", "exports")
+DATA_DIR = os.getenv("AXIO_DATA_DIR", os.path.join(BASE_DIR, "..", "data"))
+EXPORTS_DIR = os.getenv("AXIO_EXPORTS_DIR", os.path.join(BASE_DIR, "..", "exports"))
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(EXPORTS_DIR, exist_ok=True)
 
@@ -105,7 +111,7 @@ async def verify_api_key(api_key: str = Depends(API_KEY_HEADER)):
     """Require X-API-Key header when AXIO_API_KEY is set in env."""
     if not AXIO_API_KEY:
         return  # Key not configured — open (dev convenience)
-    if not secrets.compare_digest(api_key, AXIO_API_KEY):
+    if not api_key or not secrets.compare_digest(api_key, AXIO_API_KEY):
         raise HTTPException(
             status_code=401,
             detail="Invalid or missing API key. Set X-API-Key header.",
@@ -116,8 +122,30 @@ async def verify_api_key(api_key: str = Depends(API_KEY_HEADER)):
 
 def _get_session(session_id: str) -> dict:
     session = store.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
+    if session:
+        return session
+
+    # Redis is optional in local development. Recover project-backed sessions
+    # after a restart when the in-memory fallback has been cleared.
+    dataset = get_dataset_by_session(session_id)
+    if dataset:
+        safe_name = secure_filename(dataset["filename"] or "upload")
+        filepath = os.path.join(DATA_DIR, f"{session_id}_{safe_name}")
+        if os.path.exists(filepath):
+            session = {
+                "session_id": session_id,
+                "filepath": filepath,
+                "filename": dataset["filename"],
+                "analysis": dataset["analysis"],
+                "created_at": dataset["created_at"],
+                "project_id": dataset["project_id"],
+                "owner_id": dataset["owner_id"],
+            }
+            store.set(session_id, session)
+            logger.info(f"Restored session {session_id} from persisted project dataset")
+            return session
+
+    raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
     return session
 
 
@@ -147,6 +175,99 @@ def _safe_prediction_value(prediction):
 def _exports_dir(session_id: str) -> str:
     return os.path.join(EXPORTS_DIR, session_id)
 
+
+def _chart_for_request(message: str, session: dict) -> list[ChartDisplay]:
+    """Create charts from real uploaded values; never invent chart data."""
+    text = message.lower()
+    if not any(word in text for word in ("chart", "plot", "graph", "visual", "pie", "histogram")):
+        return []
+    try:
+        df = _read_dataframe(session["filepath"])
+        target = session.get("analysis", {}).get("recommended_target")
+        full_chart = any(term in text for term in (
+            "full chart", "full charts", "all charts", "complete chart", "complete charts",
+            "full visual", "full visuals", "all visualizations", "complete visualization",
+        ))
+        charts = []
+
+        if target and target in df.columns:
+            counts = df[target].value_counts(dropna=False).head(12)
+            charts.append(ChartDisplay(
+                type="pie" if ("pie" in text or "pi chart" in text) and not full_chart else "bar",
+                title=f"{target} distribution",
+                labels=["Missing" if pd.isna(v) else str(v) for v in counts.index],
+                values=[float(v) for v in counts.values],
+                x_label=target,
+                y_label="Rows",
+            ))
+
+        if not full_chart:
+            return charts
+
+        # A full chart request is intentionally bounded so a wide dataset does
+        # not create an unusable wall of charts in the chat transcript.
+        missing = df.isna().sum()
+        missing = missing[missing > 0].sort_values(ascending=False).head(12)
+        if not missing.empty:
+            charts.append(ChartDisplay(
+                type="bar",
+                title="Missing values by column",
+                labels=[str(value) for value in missing.index],
+                values=[float(value) for value in missing.values],
+                x_label="Column",
+                y_label="Missing rows",
+            ))
+
+        numeric_columns = [column for column in df.select_dtypes(include="number").columns if column != target]
+        for column in numeric_columns[:3]:
+            values = pd.to_numeric(df[column], errors="coerce").dropna()
+            if values.empty or values.nunique() < 2:
+                continue
+            counts, edges = np.histogram(values, bins=min(8, max(3, values.nunique())))
+            labels = [f"{edges[index]:.3g}–{edges[index + 1]:.3g}" for index in range(len(counts))]
+            charts.append(ChartDisplay(
+                type="histogram",
+                title=f"{column} distribution",
+                labels=labels,
+                values=[float(value) for value in counts],
+                x_label=column,
+                y_label="Rows",
+            ))
+
+        return charts[:5]
+    except Exception:
+        logger.exception("Could not build chart payload")
+        return []
+
+
+def _is_training_request(message: str) -> bool:
+    text = message.lower()
+    return any(term in text for term in ("train model", "train the model", "build a model", "fit a model", "train it"))
+
+
+def _is_feature_stats_request(message: str) -> bool:
+    text = message.lower()
+    return "feature stat" in text or "column stat" in text or "data stat" in text or "show feature" in text
+
+
+def _feature_stats_content(session: dict) -> str:
+    analysis = session.get("analysis", {})
+    features = analysis.get("features", [])
+    lines = ["## Feature statistics", "", f"**Dataset:** `{session.get('filename', 'uploaded data')}`", "", "| Feature | Type | Missing | Unique values |", "|---|---|---:|---:|"]
+    lines.extend(
+        f"| {feature['name']} | {feature['dtype']} | {feature['missing_pct']:.1f}% | {feature['unique_count']} |"
+        for feature in features
+    )
+    missing = sum(1 for feature in features if feature.get("missing_pct", 0) > 0)
+    target = analysis.get("recommended_target") or "Not detected"
+    lines.extend([
+        "", "### Key observations", "",
+        f"- **Missing data:** {'Columns require review.' if missing else 'No missing values detected.'}",
+        f"- **Recommended target:** `{target}`",
+        f"- **Dataset size:** {analysis.get('row_count', 0):,} rows × {analysis.get('col_count', 0)} columns.",
+    ])
+    return "\n".join(lines)
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/health", tags=["system"])
@@ -159,10 +280,58 @@ def health_check():
     }
 
 
+@app.get("/agent-run/{session_id}", tags=["orchestration"],
+         dependencies=[Depends(verify_api_key)])
+def agent_run_status(session_id: str):
+    """Expose the LangGraph-compatible agent state for the workspace UI."""
+    return build_agent_run(_get_session(session_id))
+
+
+@app.get("/api/projects", response_model=list[ProjectResponse], tags=["platform"],
+         dependencies=[Depends(verify_api_key)])
+def projects_list(request: Request):
+    """List projects for the current workspace placeholder.
+
+    X-Workspace-Id is intentionally temporary until user authentication lands.
+    """
+    owner_id = request.headers.get("X-Workspace-Id", "local-workspace")
+    return list_projects(owner_id)
+
+
+@app.post("/api/projects", response_model=ProjectResponse, tags=["platform"],
+          dependencies=[Depends(verify_api_key)])
+def projects_create(request: Request, payload: ProjectCreate):
+    owner_id = request.headers.get("X-Workspace-Id", "local-workspace")
+    return create_project(payload.name, payload.description, owner_id)
+
+
+@app.get("/api/projects/{project_id}/datasets", response_model=list[DatasetResponse], tags=["platform"],
+         dependencies=[Depends(verify_api_key)])
+def project_datasets(request: Request, project_id: str):
+    owner_id = request.headers.get("X-Workspace-Id", "local-workspace")
+    if not get_project(project_id, owner_id):
+        raise HTTPException(status_code=404, detail="Project not found in this workspace.")
+    return list_datasets(project_id, owner_id)
+
+
+@app.get("/api/projects/{project_id}/runs", response_model=list[RunResponse], tags=["platform"],
+         dependencies=[Depends(verify_api_key)])
+def project_runs(request: Request, project_id: str):
+    owner_id = request.headers.get("X-Workspace-Id", "local-workspace")
+    if not get_project(project_id, owner_id):
+        raise HTTPException(status_code=404, detail="Project not found in this workspace.")
+    return list_runs(project_id, owner_id)
+
+
 @app.post("/upload", response_model=AnalyzeResponse, tags=["data"],
           dependencies=[Depends(verify_api_key)])
 @limiter.limit("30/minute")
 async def upload_dataset(request: Request, file: UploadFile = File(...)):
+    project_id = request.headers.get("X-Project-Id")
+    owner_id = request.headers.get("X-Workspace-Id", "local-workspace")
+    if project_id and not get_project(project_id, owner_id):
+        raise HTTPException(status_code=404, detail="Project not found in this workspace.")
+
     ext = os.path.splitext(file.filename or "")[-1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=415, detail=f"Unsupported file type '{ext}'.")
@@ -171,12 +340,21 @@ async def upload_dataset(request: Request, file: UploadFile = File(...)):
     safe_name = secure_filename(file.filename or "upload")
     filepath = os.path.join(DATA_DIR, f"{session_id}_{safe_name}")
 
-    content = await file.read()
-    if len(content) > MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_UPLOAD_MB} MB limit.")
-
-    with open(filepath, "wb") as f:
-        f.write(content)
+    max_bytes = MAX_UPLOAD_MB * 1024 * 1024
+    bytes_written = 0
+    try:
+        with open(filepath, "wb") as f:
+            while chunk := await file.read(1024 * 1024):
+                bytes_written += len(chunk)
+                if bytes_written > max_bytes:
+                    raise HTTPException(status_code=413, detail=f"File exceeds {MAX_UPLOAD_MB} MB limit.")
+                f.write(chunk)
+    except Exception:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        raise
+    finally:
+        await file.close()
 
     try:
         df = _read_dataframe(filepath)
@@ -192,7 +370,11 @@ async def upload_dataset(request: Request, file: UploadFile = File(...)):
             "filename": file.filename,
             "analysis": analysis,
             "created_at": datetime.utcnow().isoformat(),
+            "project_id": project_id,
+            "owner_id": owner_id,
         })
+        if project_id:
+            register_dataset(project_id, owner_id, session_id, file.filename or safe_name, analysis)
 
         logger.info(f"Session {session_id} created — {analysis['row_count']} rows, {analysis['col_count']} cols")
 
@@ -217,13 +399,46 @@ async def upload_dataset(request: Request, file: UploadFile = File(...)):
           dependencies=[Depends(verify_api_key)])
 @limiter.limit("60/minute")
 def chat_endpoint(request: Request, req: ChatRequest):
-    context = store.get(req.session_id) or {}
+    context = _get_session(req.session_id)
     
     # Save user message
     session_label = context.get("filename", "New Conversation")
     save_message(req.session_id, "user", req.message, session_label=session_label)
     
     response = generate_chat_response(req.message, req.history, context)
+    response.charts = _chart_for_request(req.message, context)
+
+    if _is_feature_stats_request(req.message):
+        response.content = _feature_stats_content(context)
+        response.actions = ["Train Model", "Compare Models", "Show Feature Stats"]
+        response.metrics = []
+
+    # Chat can perform the core training action when the user explicitly asks.
+    # This uses the same validated pipeline as the Train tab, so metrics and the
+    # downloadable artifact always correspond to the actual trained model.
+    if _is_training_request(req.message):
+        target = context.get("analysis", {}).get("recommended_target")
+        if target:
+            try:
+                result = train_pipeline(req.session_id, _read_dataframe(context["filepath"]), target)
+                context["last_train"] = {"model_key": result.get("model_key", result["model_name"]), "problem_type": result["problem_type"], "metrics": result["metrics"].model_dump()}
+                store.set(req.session_id, context)
+                m = result["metrics"]
+                response.content = (
+                    f"## Model trained successfully\n\n"
+                    f"**Model:** `{result['model_name']}`  \n"
+                    f"**Target:** `{target}`  \n"
+                    f"**Task:** {result['problem_type']}\n\n"
+                    "The metrics below are from a held-out test split. Use the download action to export the trained pipeline."
+                )
+                response.metrics = [MetricDisplay(label=label, value=f"{value:.4f}") for label, value in (
+                    ("Accuracy", m.accuracy), ("F1 Score", m.f1_score), ("Precision", m.precision), ("Recall", m.recall), ("R² Score", m.r2_score)
+                ) if value is not None]
+                response.actions = ["Download .pkl", "Show feature importance"]
+            except Exception as exc:
+                logger.exception("Chat-triggered training failed")
+                response.content = f"## Training could not be completed\n\n`{exc}`\n\nCheck the target column and data quality, then try again."
+                response.actions = ["Review data", "Choose target"]
     
     # Save assistant message
     metrics_dicts = [{"label": m.label, "value": m.value, "delta": m.delta} for m in response.metrics]
@@ -266,10 +481,16 @@ async def train_model(request: Request, req: TrainRequest):
         raise HTTPException(status_code=500, detail=f"Training error: {e}")
 
     session["last_train"] = {
-        "model_key": req.target_column,
+        "model_key": req.model_key or result.get("model_key"),
         "problem_type": result["problem_type"],
     }
     store.set(req.session_id, session)
+    project_id = session.get("project_id")
+    if project_id:
+        register_run(project_id, session.get("owner_id", "local-workspace"), req.session_id, {
+            **result,
+            "metrics": result["metrics"].model_dump(),
+        })
 
     logger.info(f"Session {req.session_id} trained '{result['model_name']}' ({result['problem_type']})")
     return result
@@ -310,17 +531,20 @@ def predict(request: Request, req: PredictRequest):
         )
     except Exception as e:
         logger.exception(f"Prediction failed for session {req.session_id}")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=422, detail="The supplied values do not match the trained model schema.")
 
 
 @app.get("/export/model/{session_id}", tags=["export"],
          dependencies=[Depends(verify_api_key)])
 def export_model(session_id: str):
-    model_path = os.path.join(_exports_dir(session_id), "model.joblib")
+    _get_session(session_id)
+    model_path = os.path.join(_exports_dir(session_id), "model.pkl")
+    if not os.path.exists(model_path):
+        model_path = os.path.join(_exports_dir(session_id), "model.joblib")
     if not os.path.exists(model_path):
         raise HTTPException(status_code=404, detail="Model not found. Train first.")
     return FileResponse(model_path, media_type="application/octet-stream",
-                        filename=f"axio_model_{session_id}.joblib")
+                        filename=f"axio_model_{session_id}.pkl")
 
 
 @app.delete("/session/{session_id}", tags=["system"],
@@ -358,7 +582,7 @@ if os.path.exists(FRONTEND_DIST):
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
         # Prevent intercepting API/Health/Docs logic
-        if full_path.startswith(("health", "upload", "train", "predict", "chat", "export", "session", "docs")):
+        if full_path.startswith(("health", "api", "upload", "train", "predict", "chat", "export", "session", "docs")):
             raise HTTPException(status_code=404)
         
         index_file = os.path.join(FRONTEND_DIST, "index.html")

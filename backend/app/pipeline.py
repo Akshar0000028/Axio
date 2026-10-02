@@ -24,6 +24,10 @@ from sklearn.metrics import (
 from .schemas import MetricSet
 
 logger = logging.getLogger(__name__)
+EXPORTS_DIR = os.getenv(
+    "AXIO_EXPORTS_DIR",
+    os.path.join(os.path.dirname(__file__), "..", "exports"),
+)
 
 # ---------------------------------------------------------------------------
 # Model Mappings — HistGradientBoosting added: natively handles NaN,
@@ -259,8 +263,11 @@ def train_pipeline(
     training_time = round(time.perf_counter() - t0, 3)
 
     # ── Export ─────────────────────────────────────────────────────────────
-    exports_dir = os.path.join(os.path.dirname(__file__), "..", "exports", session_id)
+    exports_dir = os.path.join(EXPORTS_DIR, session_id)
     os.makedirs(exports_dir, exist_ok=True)
+    # Keep both extensions: .pkl is the portable artifact users expect, while
+    # model.joblib remains for backwards-compatible prediction/loading.
+    joblib.dump(clf, os.path.join(exports_dir, "model.pkl"), compress=3)
     joblib.dump(clf, os.path.join(exports_dir, "model.joblib"), compress=3)
     if label_encoder:
         joblib.dump(label_encoder, os.path.join(exports_dir, "target_encoder.joblib"), compress=3)
@@ -329,6 +336,7 @@ def train_pipeline(
         "model_name": model_key,
         "problem_type": problem_type,
         "metrics": metrics,
+        "feature_importances": metrics.feature_importance or {},
         "message": "Training successful",
         "has_label_encoder": label_encoder is not None,
         "dropped_columns": cols_to_drop + high_missing,

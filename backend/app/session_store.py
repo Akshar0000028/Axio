@@ -63,6 +63,10 @@ class SessionStore:
             return entry
 
     def set(self, session_id: str, data: dict) -> None:
+        # Keep the in-memory fallback's expiry semantics identical to Redis.
+        # Callers may update an existing record, so preserve its original age.
+        data = dict(data)
+        data.setdefault("created_at", datetime.utcnow().isoformat())
         if self._redis:
             self._redis.setex(
                 f"session:{session_id}",

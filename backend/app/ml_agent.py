@@ -2,25 +2,22 @@ import os
 import json
 import json_repair
 import logging
-from openai import OpenAI
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
-from .schemas import ChatResponse, ChatMessage, MetricDisplay
+from .schemas import ChatResponse, ChatMessage, MetricDisplay, ChartDisplay
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 logger = logging.getLogger(__name__)
 
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
-NVIDIA_NIM_MODEL = os.getenv("NVIDIA_NIM_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # Max conversation turns to keep (prevents context overflow on long sessions)
 MAX_HISTORY_TURNS = 10
 
-client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=NVIDIA_API_KEY,
-    timeout=90.0,
-)
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 SYSTEM_PROMPT = """You are Axio ML Assistant, an expert-level AI Data Scientist and Machine Learning Engineer.
 
@@ -36,7 +33,8 @@ You MUST ALWAYS respond ONLY in valid JSON with the following schema:
 {
   "content": "<markdown-formatted response>",
   "actions": ["Short Action Label"],
-  "metrics": [{"label": "Metric Name", "value": "0.94", "delta": "+2%"}]
+  "metrics": [{"label": "Metric Name", "value": "0.94", "delta": "+2%"}],
+  "charts": [{"type": "pie", "title": "Chart title", "labels": ["A", "B"], "values": [10, 20]}]
 }
 
 ----------------------------------------
@@ -168,7 +166,7 @@ def generate_chat_response(
     history: list[ChatMessage],
     context_info: dict = None,
 ) -> ChatResponse:
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = []
 
     # Inject sanitized context as a system message
     if context_info:
@@ -178,33 +176,37 @@ def generate_chat_response(
                 "Current session context (use this to give relevant advice):\n"
                 + json.dumps(safe_ctx, indent=2)
             )
-            messages.append({"role": "system", "content": ctx_str})
+            messages.append(ctx_str)
 
     # Truncate history to prevent token overflow
     for h in _truncate_history(history):
         role = h.role if h.role in ("user", "assistant") else (
             "assistant" if h.role == "ai" else "user"
         )
-        messages.append({"role": role, "content": h.content})
+        messages.append(f"{role.upper()}: {h.content}")
 
-    messages.append({"role": "user", "content": message})
+    messages.append(f"USER: {message}")
 
-    if not NVIDIA_API_KEY:
+    if not GEMINI_API_KEY or client is None:
         return ChatResponse(
-            content="⚠️ **NVIDIA_API_KEY is missing.** Please set it in your `backend/.env` file to use the AI assistant.",
+            content="⚠️ **GEMINI_API_KEY is missing.** Please set it in your `backend/.env` file to use the AI assistant.",
             actions=["Show .env Instructions"],
             metrics=[],
         )
 
     try:
-        completion = client.chat.completions.create(
-            model=NVIDIA_NIM_MODEL,
-            messages=messages,
-            temperature=0.2,   # lower = more reliable JSON
-            max_tokens=1024,
+        completion = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents="\n\n".join(messages),
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.2,
+                max_output_tokens=1024,
+                response_mime_type="application/json",
+            ),
         )
 
-        raw = completion.choices[0].message.content.strip()
+        raw = (completion.text or "").strip()
 
         # Robustly extract outermost JSON object
         start = raw.find("{")
@@ -233,10 +235,26 @@ def generate_chat_response(
                     # backwards-compat: treat plain string as label
                     metrics.append(MetricDisplay(label=m, value=""))
 
+            charts: list[ChartDisplay] = []
+            for chart in parsed.get("charts", [])[:4]:
+                if isinstance(chart, dict) and chart.get("type") in {"pie", "bar", "line", "histogram"}:
+                    try:
+                        charts.append(ChartDisplay(
+                            type=chart["type"],
+                            title=str(chart.get("title", "Chart")),
+                            labels=[str(v) for v in chart.get("labels", [])],
+                            values=[float(v) for v in chart.get("values", [])],
+                            x_label=chart.get("x_label"),
+                            y_label=chart.get("y_label"),
+                        ))
+                    except (TypeError, ValueError, KeyError):
+                        logger.warning("Ignored malformed chart payload from AI")
+
             return ChatResponse(
                 content=content or "I had trouble formatting my response. Please try again.",
                 actions=parsed.get("actions", [])[:4],  # cap at 4 buttons
                 metrics=metrics,
+                charts=charts,
             )
 
         except json.JSONDecodeError:
@@ -247,7 +265,7 @@ def generate_chat_response(
             return ChatResponse(content=raw, actions=[], metrics=[])
 
     except Exception as e:
-        logger.error(f"Nvidia API error: {e}", exc_info=True)
+        logger.error(f"Gemini API error: {e}", exc_info=True)
         return ChatResponse(
             content=f"⚠️ Error contacting AI service: {e}",
             actions=["Retry"],

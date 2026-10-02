@@ -128,7 +128,60 @@ class MetricDisplay(BaseModel):
     delta: Optional[str] = None
 
 
+class ChartDisplay(BaseModel):
+    """Small, renderer-friendly chart payload returned by the ML copilot."""
+    type: Literal["pie", "bar", "line", "histogram"]
+    title: str
+    labels: List[str] = []
+    values: List[float] = []
+    x_label: Optional[str] = None
+    y_label: Optional[str] = None
+
+
 class ChatResponse(BaseModel):
     content: str
     actions: List[str] = []
     metrics: List[MetricDisplay] = []   # FIXED: was List[str], now structured
+    charts: List[ChartDisplay] = []
+
+
+class ProjectCreate(BaseModel):
+    name: str
+    description: str = ""
+
+    @field_validator("name")
+    @classmethod
+    def name_not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Project name cannot be empty")
+        return v.strip()[:120]
+
+
+class ProjectResponse(ProjectCreate):
+    id: str
+    owner_id: str
+    created_at: str
+    updated_at: str
+
+
+class DatasetResponse(BaseModel):
+    id: str
+    project_id: str
+    owner_id: str
+    session_id: str
+    filename: str
+    row_count: int
+    col_count: int
+    analysis: Dict[str, Any]
+    created_at: str
+
+
+class RunResponse(BaseModel):
+    id: str
+    project_id: str
+    owner_id: str
+    session_id: str
+    model_name: str
+    problem_type: str
+    metrics: Dict[str, Any]
+    created_at: str
