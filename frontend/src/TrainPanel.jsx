@@ -34,7 +34,7 @@ function FeatureRow({ name, importance, index }) {
   );
 }
 
-export default function TrainPanel({ session }) {
+export default function TrainPanel({ session, onTrained }) {
   const [target, setTarget]     = useState(session.recommended_target ?? '');
   const [testSize, setTestSize] = useState(0.2);
   const [cv, setCv]             = useState(false);
@@ -52,6 +52,7 @@ export default function TrainPanel({ session }) {
     try {
       const r = await trainModel(session.session_id, target, { testSize, crossValidate: cv });
       setResult(r);
+      onTrained?.(r);
     } catch (err) {
       setError(err.message ?? 'Training failed.');
     } finally {

@@ -2,7 +2,7 @@ import { useState, useRef, useCallback } from 'react';
 import { Upload, AlertCircle, CheckCircle, FileText, X, Loader } from 'lucide-react';
 import { uploadDataset } from './api';
 
-export default function DataUploader({ onUploadSuccess }) {
+export default function DataUploader({ onUploadSuccess, projectId = '', inputId = 'dataset-input', compact = false }) {
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -20,14 +20,14 @@ export default function DataUploader({ onUploadSuccess }) {
     setUploading(true);
     setProgress(0);
     try {
-      const result = await uploadDataset(file, setProgress);
+      const result = await uploadDataset(file, setProgress, projectId);
       onUploadSuccess(result);
     } catch (err) {
       setError(err.message ?? 'Upload failed. Please try again.');
     } finally {
       setUploading(false);
     }
-  }, [onUploadSuccess]);
+  }, [onUploadSuccess, projectId]);
 
   const onDrop = useCallback((e) => {
     e.preventDefault();
@@ -37,6 +37,19 @@ export default function DataUploader({ onUploadSuccess }) {
   }, [handleFile]);
 
   const onInputChange = (e) => handleFile(e.target.files[0]);
+
+  if (compact) {
+    return (
+      <div className="compact-uploader">
+        <input ref={inputRef} id={inputId} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={onInputChange} aria-hidden="true" />
+        <button type="button" className="conversation-change-dataset" onClick={() => !uploading && inputRef.current?.click()} disabled={uploading}>
+          {uploading ? <Loader size={14} className="animate-spin" /> : <Upload size={14} />}
+          {uploading ? `Uploading ${progress}%` : 'Change dataset'}
+        </button>
+        {error && <span className="compact-uploader-error">{error}</span>}
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col" style={{ gap: 16 }}>
@@ -62,6 +75,7 @@ export default function DataUploader({ onUploadSuccess }) {
       >
         <input
           ref={inputRef}
+          id={inputId}
           type="file"
           accept=".csv,.xlsx,.xls"
           className="hidden"

@@ -13,6 +13,20 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const CHAT_TIMEOUT_MS    = 100_000;
 const TRAIN_TIMEOUT_MS   = 120_000;
 
+export async function getProjects() { return apiFetch('/api/projects'); }
+export async function createProject(name, description = '') {
+  return apiFetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, description }) });
+}
+export async function getProjectDatasets(projectId) {
+  return apiFetch(`/api/projects/${encodeURIComponent(projectId)}/datasets`);
+}
+export async function getProjectRuns(projectId) {
+  return apiFetch(`/api/projects/${encodeURIComponent(projectId)}/runs`);
+}
+export async function getAgentRun(sessionId) {
+  return apiFetch(`/agent-run/${encodeURIComponent(sessionId)}`);
+}
+
 // ── Typed API Error ────────────────────────────────────────────────────────
 export class ApiError extends Error {
   constructor(message, status, detail) {
@@ -47,10 +61,14 @@ async function apiFetch(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
 
     if (!res.ok) {
       let detail = res.statusText;
-      try { detail = (await res.json()).detail ?? detail; } catch { }
+      try { detail = (await res.json()).detail ?? detail; } catch (parseError) { void parseError; /* non-JSON error response */ }
       throw new ApiError(`API error ${res.status}: ${detail}`, res.status, detail);
     }
 
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      throw new ApiError(`Invalid API response from ${path}`, res.status, 'The backend returned a non-JSON response. Check that the API server is running.');
+    }
     return res.json();
   } catch (err) {
     if (err.name === 'AbortError') throw new ApiError('Request timed out', 408, 'timeout');
@@ -82,7 +100,7 @@ async function withRetry(fn, retries = 2, delayMs = 800) {
  * @param {File} file
  * @param {(pct: number) => void} [onProgress]
  */
-export async function uploadDataset(file, onProgress) {
+export async function uploadDataset(file, onProgress, projectId = '') {
   const formData = new FormData();
   formData.append('file', file);
 
@@ -92,11 +110,14 @@ export async function uploadDataset(file, onProgress) {
       xhr.open('POST', `${API_BASE}/upload`);
       // Attach API key to XHR as well
       if (API_KEY) xhr.setRequestHeader('X-API-Key', API_KEY);
+      if (projectId) xhr.setRequestHeader('X-Project-Id', projectId);
       xhr.upload.onprogress = e => {
         if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
       };
       xhr.onload = () => {
-        const data = JSON.parse(xhr.responseText);
+        let data;
+        try { data = JSON.parse(xhr.responseText); }
+        catch { reject(new ApiError('Invalid API response during upload', xhr.status, 'The backend returned a non-JSON response.')); return; }
         if (xhr.status >= 400) reject(new ApiError(data.detail ?? xhr.statusText, xhr.status, data.detail));
         else resolve(data);
       };
@@ -105,7 +126,11 @@ export async function uploadDataset(file, onProgress) {
     });
   }
 
-  return withRetry(() => apiFetch('/upload', { method: 'POST', body: formData }));
+  return withRetry(() => apiFetch('/upload', {
+    method: 'POST',
+    headers: projectId ? { 'X-Project-Id': projectId } : {},
+    body: formData,
+  }));
 }
 
 /**
@@ -158,6 +183,27 @@ export async function sendChatMessage(sessionId, message, history = []) {
 export function getExportUrl(type, sessionId) {
   // Currently backend only supports 'model' type at /export/model/{id}
   return `${API_BASE}/export/model/${sessionId}`;
+}
+
+/** Download an authenticated export. Anchor downloads cannot attach X-API-Key. */
+export async function downloadModel(sessionId) {
+  const response = await fetch(getExportUrl('model', sessionId), {
+    headers: authHeaders(),
+  });
+  if (!response.ok) {
+    let detail = response.statusText;
+    try { detail = (await response.json()).detail ?? detail; } catch (parseError) { void parseError; }
+    throw new ApiError(`API error ${response.status}: ${detail}`, response.status, detail);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `axio_model_${sessionId}.pkl`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 /**

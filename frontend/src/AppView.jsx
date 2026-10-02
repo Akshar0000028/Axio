@@ -11,6 +11,12 @@ const TABS = [
   { id: 'chat',    label: 'AI Chat', icon: '💬' },
 ];
 
+const STEPS = [
+  { id: 'upload', label: 'Upload data' },
+  { id: 'train', label: 'Train model' },
+  { id: 'predict', label: 'Make predictions' },
+];
+
 function ColumnBadge({ f }) {
   const isCat = f.dtype === 'object' || f.dtype === 'category';
   return (
@@ -124,11 +130,11 @@ export default function AppView({ onBack }) {
 
       {/* ── Main Area ───────────────────────────────── */}
       <div
-        className="flex flex-1"
+        className="app-content flex flex-1"
         style={{ minHeight: 0, overflow: 'hidden' }}
       >
         {/* ── Left sidebar: upload / columns ──────── */}
-        <div
+        <div className="app-sidebar"
           style={{
             width: 300,
             flexShrink: 0,
@@ -165,8 +171,7 @@ export default function AppView({ onBack }) {
         </div>
 
         {/* ── Right main panel ─────────────────────── */}
-        <div
-          className="flex flex-col flex-1"
+        <div className="app-main flex flex-col flex-1"
           style={{ minWidth: 0, overflow: 'hidden' }}
         >
           {!session ? (
@@ -188,6 +193,17 @@ export default function AppView({ onBack }) {
             </div>
           ) : (
             <div className="flex flex-col flex-1" style={{ overflow: 'hidden' }}>
+              <div className="workflow-stepper" aria-label="Workflow progress">
+                {STEPS.map((step, index) => {
+                  const active = step.id === 'upload' || (step.id === 'train' && tab === 'train') || (step.id === 'predict' && tab === 'predict');
+                  return (
+                    <div key={step.id} className={`workflow-step ${active ? 'is-active' : ''}`}>
+                      <span className="workflow-step-number">{index + 1}</span>
+                      <span>{step.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
               {/* Tabs */}
               <div className="flex items-center" style={{
                 padding: '0 24px',

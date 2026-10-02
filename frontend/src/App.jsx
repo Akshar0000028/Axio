@@ -5,6 +5,8 @@ import FeaturesSection from './FeaturesSection';
 import StatsSection from './StatsSection';
 import CTASection from './CTASection';
 import AxioChat from './AxioChat';
+import ProjectDashboard from './ProjectDashboard';
+import ProjectWorkspace from './ProjectWorkspace';
 
 function Footer() {
   return (
@@ -37,9 +39,11 @@ function Footer() {
 
 export default function App() {
   const [showApp, setShowApp] = useState(false);
+  const [activeProject, setActiveProject] = useState(null);
 
   if (showApp) {
-    return <AxioChat onBack={() => setShowApp(false)} />;
+    if (activeProject) return <ProjectWorkspace project={activeProject} onBack={() => setActiveProject(null)} />;
+    return <ProjectDashboard onBack={() => setShowApp(false)} onOpenProject={setActiveProject} />;
   }
 
   return (

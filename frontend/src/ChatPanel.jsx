@@ -1,217 +1,149 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Bot, User, Loader } from 'lucide-react';
+import { Send, Bot, User, Loader, BarChart3, Download } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { sendChatMessage } from './api';
+import { sendChatMessage, downloadModel } from './api';
 
-const WELCOME = {
-  role: 'assistant',
-  content: "👋 Hi! I'm the **Axio ML Agent**. I can help you understand your dataset, interpret model results, choose better features, or explain any ML concept. What would you like to know?"
-};
-
-export default function ChatPanel({ sessionId }) {
-  const [messages, setMessages] = useState([WELCOME]);
+export default function ChatPanel({ sessionId, initialMessages = [], onMessageSent }) {
+  const [messages, setMessages] = useState(initialMessages);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [, setDownloadError] = useState('');
   const bottomRef = useRef(null);
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
   const send = async () => {
-    const msg = input.trim();
-    if (!msg || loading) return;
+    const message = input.trim();
+    if (!message || loading) return;
     setInput('');
-    const userMsg = { role: 'user', content: msg };
-    setMessages(prev => [...prev, userMsg]);
+    setMessages(previous => [...previous, { role: 'user', content: message }]);
     setLoading(true);
     try {
-      const history = messages.map(m => ({ role: m.role, content: m.content }));
-      const res = await sendChatMessage(sessionId, msg, history);
-      setMessages(prev => [...prev, { role: 'assistant', content: res.message }]);
-    } catch (err) {
-      setMessages(prev => [...prev, { role: 'assistant', content: `⚠️ ${err.message}` }]);
+      const history = messages.map(item => ({ role: item.role, content: item.content }));
+      const response = await sendChatMessage(sessionId, message, history);
+      setMessages(previous => [...previous, { role: 'assistant', ...response }]);
+      onMessageSent?.();
+    } catch (error) {
+      setMessages(previous => [...previous, { role: 'assistant', content: `⚠️ ${error.message}` }]);
     } finally {
       setLoading(false);
     }
   };
 
-  const onKeyDown = e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  const handleAction = async action => {
+    if (/download.*(pkl|model)|export/i.test(action)) {
+      setDownloadError('');
+      try { await downloadModel(sessionId); }
+      catch (error) { setDownloadError(error.message); }
+      return;
+    }
+    setInput(action);
   };
 
-  return (
-    <div className="glass-card flex flex-col" style={{ height: '100%', minHeight: 480, overflow: 'hidden' }}>
-      {/* Header */}
-      <div className="flex items-center" style={{
-        padding: '16px 20px',
-        borderBottom: '1px solid rgba(255,255,255,0.08)',
-        gap: 10,
-        flexShrink: 0,
-      }}>
-        <div style={{
-          width: 32, height: 32, borderRadius: 8,
-          background: 'rgba(79,140,255,0.12)',
-          border: '1px solid rgba(79,140,255,0.2)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          <Bot size={16} color="#4f8cff" />
-        </div>
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 600 }}>Axio ML Agent</div>
-          <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>Powered by NVIDIA NIM</div>
-        </div>
-        <div style={{
-          marginLeft: 'auto',
-          width: 8, height: 8, borderRadius: '50%',
-          background: '#34d399',
-          boxShadow: '0 0 6px rgba(52,211,153,0.6)',
-        }} />
-      </div>
+  const onKeyDown = event => {
+    if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); }
+  };
 
-      {/* Messages */}
-      <div className="flex flex-col" style={{
-        flex: 1,
-        overflowY: 'auto',
-        padding: '20px',
-        gap: 16,
-      }}>
-        {messages.map((m, i) => (
-          <div
-            key={i}
-            className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
-            style={{ gap: 10 }}
-          >
-            {m.role === 'assistant' && (
-              <div style={{
-                width: 28, height: 28, borderRadius: 6,
-                background: 'rgba(79,140,255,0.12)',
-                border: '1px solid rgba(79,140,255,0.2)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                flexShrink: 0, marginTop: 2,
-              }}>
-                <Bot size={14} color="#4f8cff" />
-              </div>
-            )}
-            <div
-              className={m.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-ai'}
-              style={{
-                padding: '10px 14px',
-                maxWidth: '80%',
-                fontSize: 14,
-                lineHeight: 1.6,
-                color: m.role === 'user' ? '#fff' : 'rgba(255,255,255,0.85)',
-              }}
-            >
-              {m.role === 'assistant' ? (
-                <ReactMarkdown
-                  components={{
-                    p: ({ children }) => <div style={{ margin: 0 }}>{children}</div>,
-                    strong: ({ children }) => <strong style={{ color: '#fff' }}>{children}</strong>,
-                    code: ({ children }) => (
-                      <code style={{
-                        background: 'rgba(255,255,255,0.08)',
-                        padding: '1px 5px',
-                        borderRadius: 4,
-                        fontSize: 12,
-                        fontFamily: 'monospace',
-                      }}>{children}</code>
-                    ),
-                  }}
-                >
-                  {m.content}
-                </ReactMarkdown>
-              ) : m.content}
-            </div>
-            {m.role === 'user' && (
-              <div style={{
-                width: 28, height: 28, borderRadius: 6,
-                background: 'rgba(255,255,255,0.08)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                flexShrink: 0, marginTop: 2,
-              }}>
-                <User size={14} color="rgba(255,255,255,0.6)" />
-              </div>
-            )}
+  return <section className="chat-panel" aria-label="Chat with Axio">
+    <div className="chat-panel-messages" aria-live="polite">
+      {messages.length === 0 && <div className="chat-empty-state">
+        <div className="chat-empty-chart" aria-hidden="true">
+          <div className="chat-empty-chart-grid" />
+          <div className="chat-empty-chart-bars">
+            {[38, 54, 46, 68, 61, 82, 74, 94].map((height, index) => <i key={index} style={{ height: `${height}%` }} />)}
           </div>
-        ))}
-
-        {loading && (
-          <div className="flex items-center" style={{ gap: 8 }}>
-            <div style={{
-              width: 28, height: 28, borderRadius: 6,
-              background: 'rgba(79,140,255,0.12)',
-              border: '1px solid rgba(79,140,255,0.2)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-            }}>
-              <Bot size={14} color="#4f8cff" />
-            </div>
-            <div className="chat-bubble-ai flex items-center" style={{ padding: '10px 14px', gap: 6 }}>
-              <Loader size={14} color="rgba(255,255,255,0.5)" className="animate-spin" />
-              <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.45)' }}>Thinking…</span>
-            </div>
-          </div>
-        )}
-        <div ref={bottomRef} />
-      </div>
-
-      {/* Input */}
-      <div style={{
-        padding: '12px 16px',
-        borderTop: '1px solid rgba(255,255,255,0.08)',
-        flexShrink: 0,
-      }}>
-        <div className="flex items-end" style={{
-          background: 'rgba(255,255,255,0.05)',
-          border: '1px solid rgba(255,255,255,0.12)',
-          borderRadius: 12,
-          padding: '8px 12px',
-          gap: 8,
-        }}>
-          <textarea
-            id="chat-input"
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder="Ask about your data, model, or ML concepts…"
-            rows={1}
-            style={{
-              flex: 1,
-              background: 'none',
-              border: 'none',
-              outline: 'none',
-              resize: 'none',
-              color: '#fff',
-              fontSize: 14,
-              fontFamily: 'inherit',
-              lineHeight: 1.5,
-              padding: '2px 0',
-              maxHeight: 120,
-              overflowY: 'auto',
-            }}
-          />
-          <button
-            id="chat-send-btn"
-            onClick={send}
-            disabled={loading || !input.trim()}
-            style={{
-              width: 32, height: 32,
-              borderRadius: 8,
-              background: loading || !input.trim() ? 'rgba(79,140,255,0.2)' : '#4f8cff',
-              border: 'none',
-              cursor: loading || !input.trim() ? 'not-allowed' : 'pointer',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0,
-              transition: 'background 0.2s',
-            }}
-          >
-            <Send size={14} color="#fff" />
-          </button>
+          <div className="chat-empty-chart-line" />
+          <span className="chat-empty-chart-point point-one" />
+          <span className="chat-empty-chart-point point-two" />
+          <span className="chat-empty-chart-point point-three" />
+          <span className="chat-empty-chart-point point-four" />
         </div>
-        <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: 6, textAlign: 'center' }}>
-          Enter to send · Shift+Enter for new line
-        </p>
-      </div>
+        <span className="chat-only-eyebrow"><Bot size={14} /> YOUR DATA COPILOT</span>
+        <h1>What can I help you with?</h1>
+        <p>Ask a question or share a dataset to get started. Axio handles the analysis behind the scenes.</p>
+      </div>}
+      {messages.map((message, index) => <div key={index} className={`chat-message ${message.role}`}>
+        <span className="chat-message-avatar" aria-hidden="true">{message.role === 'assistant' ? <Bot size={16} /> : <User size={15} />}</span>
+        <div className="chat-message-bubble">
+          {message.role === 'assistant' ? <>
+            <MarkdownContent content={message.content} />
+            {message.metrics?.length > 0 && <div className="chat-metrics">
+              {message.metrics.map(metric => <div className="chat-metric" key={metric.label}>
+                <span>{metric.label}</span><strong>{metric.value}</strong>{metric.delta && <small>{metric.delta}</small>}
+              </div>)}
+            </div>}
+            {message.charts?.map((chart, chartIndex) => <ChartCard key={`${chart.title}-${chartIndex}`} chart={chart} />)}
+            {message.actions?.length > 0 && <div className="chat-actions">
+              {message.actions.map(action => <button key={action} onClick={() => handleAction(action)}>
+                {/download|export/i.test(action) ? <Download size={13} /> : <BarChart3 size={13} />}{action}
+              </button>)}
+            </div>}
+          </> : message.content}
+        </div>
+      </div>)}
+      {loading && <div className="chat-message assistant"><span className="chat-message-avatar"><Bot size={16} /></span><div className="chat-message-bubble chat-thinking"><Loader size={15} className="animate-spin" /> Axio is thinking…</div></div>}
+      <div ref={bottomRef} />
     </div>
-  );
+    <div className="chat-panel-composer">
+      <div className="chat-composer-row">
+        <textarea
+          id="chat-input"
+          value={input}
+          onChange={event => setInput(event.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder="Message Axio…"
+          aria-label="Message Axio"
+          rows={1}
+        />
+        <button id="chat-send-btn" onClick={send} disabled={loading || !input.trim()} aria-label="Send message"><Send size={17} /></button>
+      </div>
+      <p>Enter to send · Shift+Enter for a new line</p>
+    </div>
+  </section>;
+}
+
+function MarkdownContent({ content }) {
+  const lines = content.split(/\r?\n/);
+  const blocks = [];
+  let markdown = [];
+  const flush = () => { if (markdown.length) { blocks.push({ type: 'markdown', value: markdown.join('\n') }); markdown = []; } };
+  for (let index = 0; index < lines.length; index += 1) {
+    if (isTableRow(lines[index]) && isTableSeparator(lines[index + 1])) {
+      flush();
+      const headers = splitTableRow(lines[index]);
+      const rows = [];
+      index += 2;
+      while (index < lines.length && isTableRow(lines[index])) { rows.push(splitTableRow(lines[index])); index += 1; }
+      index -= 1;
+      blocks.push({ type: 'table', headers, rows });
+    } else markdown.push(lines[index]);
+  }
+  flush();
+  return <>{blocks.map((block, index) => block.type === 'table'
+    ? <div className="chat-table-wrap" key={`table-${index}`}><table><thead><tr>{block.headers.map(header => <th key={header}>{header}</th>)}</tr></thead><tbody>{block.rows.map((row, rowIndex) => <tr key={rowIndex}>{block.headers.map((_, cellIndex) => <td key={cellIndex}>{row[cellIndex] ?? '—'}</td>)}</tr>)}</tbody></table></div>
+    : <ReactMarkdown key={`markdown-${index}`} components={{ p: ({ children }) => <p>{children}</p> }}>{block.value}</ReactMarkdown>)}</>;
+}
+
+function isTableRow(line = '') { return line.trim().startsWith('|') && line.trim().endsWith('|'); }
+function isTableSeparator(line = '') { return isTableRow(line) && line.split('|').slice(1, -1).every(cell => /^\s*:?-{3,}:?\s*$/.test(cell)); }
+function splitTableRow(line) { return line.trim().slice(1, -1).split('|').map(cell => cell.trim()); }
+
+function ChartCard({ chart }) {
+  const total = chart.values.reduce((sum, value) => sum + value, 0) || 1;
+  const colors = ['#588b58', '#9bb896', '#d6b36a', '#7a9cc6', '#b07aa1', '#6f8d7a'];
+  const slices = chart.values.reduce((result, value, index) => {
+    const start = result.cursor;
+    const end = start + (value / total) * 360;
+    result.parts.push(`${colors[index % colors.length]} ${start}deg ${end}deg`);
+    result.cursor = end;
+    return result;
+  }, { cursor: 0, parts: [] }).parts.join(', ');
+  return <div className="chat-chart-card">
+    <div className="chat-chart-title"><BarChart3 size={14} />{chart.title}</div>
+    <div className="chat-chart-body">
+      {chart.type === 'pie' ? <div className="chat-pie" style={{ background: `conic-gradient(${slices})` }} /> :
+        <div className="chat-bars">{chart.values.map((value, index) => <div className="chat-bar-row" key={`${chart.labels[index]}-${index}`}><span>{chart.labels[index]}</span><div><i style={{ width: `${(value / Math.max(...chart.values, 1)) * 100}%`, background: colors[index % colors.length] }} /></div><b>{value}</b></div>)}</div>}
+      {chart.type === 'pie' && <div className="chat-legend">{chart.labels.map((label, index) => <span key={`${label}-${index}`}><i style={{ background: colors[index % colors.length] }} />{label}: {chart.values[index]}</span>)}</div>}
+    </div>
+  </div>;
 }

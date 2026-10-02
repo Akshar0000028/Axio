@@ -534,7 +534,9 @@ export default function AxioChat({ onBack }) {
       try {
         const sessions = await getChatSessions();
         setConversations(sessions);
-      } catch (e) {}
+      } catch (err) {
+        console.warn('Could not refresh conversations after upload', err);
+      }
 
     } catch (err) {
       updateMessage(uploadId, { done: true });

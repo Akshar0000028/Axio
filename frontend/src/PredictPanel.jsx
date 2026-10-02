@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { predict, getExportUrl } from './api';
+import { predict, downloadModel } from './api';
 import { Zap, Download, AlertCircle, ChevronDown, Loader } from 'lucide-react';
 
 export default function PredictPanel({ session }) {
@@ -23,7 +23,14 @@ export default function PredictPanel({ session }) {
     }
   };
 
-  const exportUrl = getExportUrl('model', session.session_id);
+  const [downloading, setDownloading] = useState(false);
+  const handleDownload = async () => {
+    setDownloading(true);
+    setError(null);
+    try { await downloadModel(session.session_id); }
+    catch (err) { setError(err.message ?? 'Download failed.'); }
+    finally { setDownloading(false); }
+  };
 
   return (
     <div className="flex flex-col" style={{ gap: 20 }}>
@@ -133,9 +140,9 @@ export default function PredictPanel({ session }) {
       )}
 
       {/* Export */}
-      <a
-        href={exportUrl}
-        download
+      <button
+        onClick={handleDownload}
+        disabled={downloading}
         id="export-model-btn"
         className="flex items-center justify-center glass-card"
         style={{
@@ -151,8 +158,8 @@ export default function PredictPanel({ session }) {
         onMouseLeave={e => e.currentTarget.style.borderColor = 'rgba(255,255,255,0.10)'}
       >
         <Download size={16} color="rgba(255,255,255,0.6)" />
-        Download Model (.joblib)
-      </a>
+        {downloading ? 'Preparing download…' : 'Download Model (.joblib)'}
+      </button>
     </div>
   );
 }
