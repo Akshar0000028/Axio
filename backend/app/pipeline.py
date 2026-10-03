@@ -124,11 +124,37 @@ def analyze_dataset_pipeline(df: pd.DataFrame) -> dict:
             "sample_values": df[col].dropna().head(3).tolist(),
             "is_likely_target": is_likely_target,
         })
+    numeric_summary = {}
+    for col in df.select_dtypes(include="number").columns[:30]:
+        series = df[col].dropna()
+        numeric_summary[col] = {
+            "min": float(series.min()) if not series.empty else None,
+            "max": float(series.max()) if not series.empty else None,
+            "mean": float(series.mean()) if not series.empty else None,
+            "std": float(series.std()) if len(series) > 1 else 0.0,
+        }
+    missing_cells = int(df.isna().sum().sum())
+    constant_columns = [str(col) for col in df.columns if df[col].nunique(dropna=False) <= 1]
+    warnings = []
+    if missing_cells:
+        warnings.append(f"{missing_cells:,} missing cells require review.")
+    if constant_columns:
+        warnings.append(f"Constant columns detected: {', '.join(constant_columns[:8])}.")
+    if len(df) < 30:
+        warnings.append("Small dataset: evaluation metrics may be unstable.")
     return {
         "row_count": len(df),
         "col_count": len(df.columns),
         "features": features,
         "recommended_target": recommended_target,
+        "profile": {
+            "duplicate_rows": int(df.duplicated().sum()),
+            "missing_cells": missing_cells,
+            "missing_by_column": {str(k): int(v) for k, v in df.isna().sum().items() if v},
+            "constant_columns": constant_columns,
+            "numeric_summary": numeric_summary,
+            "warnings": warnings,
+        },
     }
 
 

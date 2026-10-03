@@ -26,6 +26,7 @@ class AnalyzeResponse(BaseModel):
     recommended_target: Optional[str] = None
     problem_type: Optional[str] = None
     recommendations: List[ModelRecommendation] = []
+    profile: Dict[str, Any] = {}
 
 
 class TrainRequest(BaseModel):
@@ -77,6 +78,17 @@ class TrainResponse(BaseModel):
     problem_type: str
     metrics: MetricSet
     message: str
+
+
+class TrainingJobResponse(BaseModel):
+    id: str
+    session_id: str
+    status: str
+    progress: int
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    created_at: str
+    updated_at: str
 
 
 class PredictRequest(BaseModel):
@@ -165,6 +177,35 @@ class ProjectResponse(ProjectCreate):
     updated_at: str
 
 
+class ProjectMemberCreate(BaseModel):
+    email: str
+    role: Literal["viewer", "editor"] = "viewer"
+
+    @field_validator("email")
+    @classmethod
+    def member_email(cls, v: str) -> str:
+        return v.strip().lower()
+
+
+class ProjectMemberResponse(BaseModel):
+    project_id: str
+    user_id: str
+    email: str
+    name: str
+    role: str
+    created_at: str
+
+
+class AuditEventResponse(BaseModel):
+    id: str
+    project_id: str
+    actor_id: str
+    action: str
+    resource: str
+    metadata: Dict[str, Any]
+    created_at: str
+
+
 class DatasetResponse(BaseModel):
     id: str
     project_id: str
@@ -185,6 +226,8 @@ class RunResponse(BaseModel):
     model_name: str
     problem_type: str
     metrics: Dict[str, Any]
+    parameters: Dict[str, Any] = {}
+    model_version: str = "v1"
     created_at: str
 
 

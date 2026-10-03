@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { predict, downloadModel } from './api';
+import { predict, batchPredict, downloadModel } from './api';
 import { Zap, Download, AlertCircle, ChevronDown, Loader } from 'lucide-react';
 
 export default function PredictPanel({ session }) {
@@ -8,6 +8,8 @@ export default function PredictPanel({ session }) {
   const [loading, setLoading]   = useState(false);
   const [result, setResult]     = useState(null);
   const [error, setError]       = useState(null);
+  const [batchFile, setBatchFile] = useState(null);
+  const [batchLoading, setBatchLoading] = useState(false);
 
   const handlePredict = async () => {
     setLoading(true);
@@ -30,6 +32,22 @@ export default function PredictPanel({ session }) {
     try { await downloadModel(session.session_id); }
     catch (err) { setError(err.message ?? 'Download failed.'); }
     finally { setDownloading(false); }
+  };
+
+  const handleBatchPredict = async () => {
+    if (!batchFile) return;
+    setBatchLoading(true);
+    setError(null);
+    try {
+      const blob = await batchPredict(session.session_id, batchFile);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'axio_predictions.csv';
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (err) { setError(err.message ?? 'Batch prediction failed.'); }
+    finally { setBatchLoading(false); }
   };
 
   return (
@@ -160,6 +178,15 @@ export default function PredictPanel({ session }) {
         <Download size={16} color="rgba(255,255,255,0.6)" />
         {downloading ? 'Preparing download…' : 'Download Model (.joblib)'}
       </button>
+
+      <div className="glass-card" style={{ padding: 20 }}>
+        <h4 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Batch Prediction</h4>
+        <p style={{ fontSize: 12, color: 'rgba(255,255,255,.45)', marginBottom: 12 }}>Upload CSV or Excel rows and download predictions.</p>
+        <input type="file" accept=".csv,.xlsx,.xls" onChange={e => setBatchFile(e.target.files?.[0] ?? null)} style={{ color: 'rgba(255,255,255,.7)', fontSize: 12, width: '100%' }} />
+        <button onClick={handleBatchPredict} disabled={!batchFile || batchLoading} className="flex items-center justify-center glass-card" style={{ marginTop: 12, width: '100%', padding: 12, color: '#fff' }}>
+          {batchLoading ? <Loader size={15} className="animate-spin" /> : 'Run batch prediction'}
+        </button>
+      </div>
     </div>
   );
 }

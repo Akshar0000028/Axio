@@ -5,6 +5,7 @@ import logging
 import asyncio
 import secrets
 import shutil
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from datetime import datetime, timedelta
@@ -14,12 +15,13 @@ import numpy as np
 import joblib
 
 from werkzeug.utils import secure_filename
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Request, Depends
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Request, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -29,7 +31,8 @@ from .schemas import (
     AnalyzeResponse, TrainRequest, TrainResponse,
     PredictRequest, PredictResponse,
     ChatRequest, ChatResponse, ChartDisplay, MetricDisplay, ProjectCreate, ProjectResponse, DatasetResponse, RunResponse,
-    RegisterRequest, LoginRequest, AuthResponse, UserResponse,
+    RegisterRequest, LoginRequest, AuthResponse, UserResponse, TrainingJobResponse,
+    ProjectMemberCreate, ProjectMemberResponse, AuditEventResponse,
 )
 from .pipeline import analyze_dataset_pipeline, train_pipeline
 from .ml_agent import generate_chat_response
@@ -37,17 +40,19 @@ from .agents import build_agent_run
 from .session_store import SessionStore
 from .database import init_db, save_message, get_history, get_sessions
 from .platform_store import (
-    init_platform_db, list_projects, create_project, get_project,
+    init_platform_db, list_projects, create_project, get_project, add_member, list_members, list_audit, record_audit,
     register_dataset, list_datasets, get_dataset_by_session, register_run, list_runs,
 )
 from .auth_store import (
     JWT_EXPIRE_MINUTES, authenticate_user, create_access_token, create_user,
-    decode_access_token, init_auth_db,
+    decode_access_token, init_auth_db, get_user_by_email,
 )
+from .job_store import init_job_db, create_job, update_job, get_job
 
 init_db()
-init_platform_db()
 init_auth_db()
+init_platform_db()
+init_job_db()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,6 +103,25 @@ app = FastAPI(
     docs_url=None if IS_PROD else "/docs",
     redoc_url=None,
 )
+
+
+class RequestObservabilityMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        started = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception:
+            logger.exception("request_failed request_id=%s method=%s path=%s", request_id, request.method, request.url.path)
+            raise
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+        response.headers["X-Request-ID"] = request_id
+        logger.info("request_complete request_id=%s method=%s path=%s status=%s duration_ms=%s",
+                    request_id, request.method, request.url.path, response.status_code, elapsed_ms)
+        return response
+
+
+app.add_middleware(RequestObservabilityMiddleware)
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -353,7 +377,37 @@ def projects_list(request: Request):
           dependencies=[Depends(require_auth)])
 def projects_create(request: Request, payload: ProjectCreate):
     owner_id = current_owner(request)
-    return create_project(payload.name, payload.description, owner_id)
+    project = create_project(payload.name, payload.description, owner_id)
+    record_audit(project["id"], owner_id, "project.created", project["id"], {})
+    return project
+
+
+@app.get("/api/projects/{project_id}/members", response_model=list[ProjectMemberResponse], tags=["platform"], dependencies=[Depends(require_auth)])
+def project_members(request: Request, project_id: str):
+    if not get_project(project_id, current_owner(request)):
+        raise HTTPException(status_code=404, detail="Project not found in this workspace.")
+    return list_members(project_id)
+
+
+@app.post("/api/projects/{project_id}/members", response_model=ProjectMemberResponse, tags=["platform"], dependencies=[Depends(require_auth)])
+def project_member_add(request: Request, project_id: str, payload: ProjectMemberCreate):
+    actor = current_owner(request)
+    project = get_project(project_id, actor)
+    if not project or project["owner_id"] != actor:
+        raise HTTPException(status_code=403, detail="Only the project owner can manage members.")
+    user = get_user_by_email(payload.email)
+    if not user:
+        raise HTTPException(status_code=404, detail="No registered user exists for that email.")
+    member = add_member(project_id, user["id"], payload.role)
+    record_audit(project_id, actor, "project.member_added", user["id"], {"role": payload.role})
+    return member
+
+
+@app.get("/api/projects/{project_id}/audit", response_model=list[AuditEventResponse], tags=["platform"], dependencies=[Depends(require_auth)])
+def project_audit(request: Request, project_id: str):
+    if not get_project(project_id, current_owner(request)):
+        raise HTTPException(status_code=404, detail="Project not found in this workspace.")
+    return list_audit(project_id)
 
 
 @app.get("/api/projects/{project_id}/datasets", response_model=list[DatasetResponse], tags=["platform"],
@@ -426,6 +480,7 @@ async def upload_dataset(request: Request, file: UploadFile = File(...)):
         })
         if project_id:
             register_dataset(project_id, owner_id, session_id, file.filename or safe_name, analysis)
+            record_audit(project_id, owner_id, "dataset.uploaded", session_id, {"filename": file.filename, "rows": analysis["row_count"]})
 
         logger.info(f"Session {session_id} created — {analysis['row_count']} rows, {analysis['col_count']} cols")
 
@@ -438,6 +493,7 @@ async def upload_dataset(request: Request, file: UploadFile = File(...)):
             recommended_target=analysis.get("recommended_target"),
             problem_type=None,
             recommendations=[],
+            profile=analysis.get("profile", {}),
         )
     except Exception as e:
         if os.path.exists(filepath):
@@ -547,10 +603,59 @@ async def train_model(request: Request, req: TrainRequest):
         register_run(project_id, session.get("owner_id", "local-workspace"), req.session_id, {
             **result,
             "metrics": result["metrics"].model_dump(),
+            "parameters": req.model_dump(exclude={"session_id"}),
         })
+        record_audit(project_id, current_owner(request), "model.trained", req.session_id, {"model": result["model_name"]})
 
     logger.info(f"Session {req.session_id} trained '{result['model_name']}' ({result['problem_type']})")
     return result
+
+
+def _run_training_job(job_id: str, req: TrainRequest, owner_id: str):
+    job = get_job(job_id, owner_id)
+    if not job:
+        return
+    try:
+        update_job(job_id, status="running", progress=10)
+        session = _get_session(req.session_id, owner_id)
+        df = _read_dataframe(session["filepath"])
+        update_job(job_id, progress=25)
+        result = train_pipeline(
+            session_id=req.session_id, df=df, target_column=req.target_column,
+            model_key=req.model_key, test_size=req.test_size,
+            cross_validate=req.cross_validate, n_cv_folds=req.n_cv_folds,
+        )
+        session["last_train"] = {"model_key": req.model_key or result.get("model_key"), "problem_type": result["problem_type"]}
+        store.set(req.session_id, session)
+        project_id = session.get("project_id")
+        if project_id:
+            register_run(project_id, session.get("owner_id", owner_id), req.session_id, {
+                **result,
+                "metrics": result["metrics"].model_dump(),
+                "parameters": req.model_dump(exclude={"session_id"}),
+            })
+            record_audit(project_id, owner_id, "model.trained", req.session_id, {"model": result["model_name"]})
+        update_job(job_id, status="completed", progress=100, result={**result, "metrics": result["metrics"].model_dump()})
+    except Exception as exc:
+        logger.exception("Training job %s failed", job_id)
+        update_job(job_id, status="failed", progress=100, error=str(exc))
+
+
+@app.post("/train/jobs", response_model=TrainingJobResponse, tags=["ml"], dependencies=[Depends(require_auth)])
+@limiter.limit("10/minute")
+def create_training_job(request: Request, req: TrainRequest):
+    session = _get_session(req.session_id, current_owner(request))
+    job = create_job(req.session_id, current_owner(request), session.get("project_id"), req.model_dump())
+    _executor.submit(_run_training_job, job["id"], req, current_owner(request))
+    return job
+
+
+@app.get("/train/jobs/{job_id}", response_model=TrainingJobResponse, tags=["ml"], dependencies=[Depends(require_auth)])
+def training_job_status(request: Request, job_id: str):
+    job = get_job(job_id, current_owner(request))
+    if not job:
+        raise HTTPException(status_code=404, detail="Training job not found.")
+    return job
 
 
 @app.post("/predict", response_model=PredictResponse, tags=["ml"],
@@ -590,6 +695,122 @@ def predict(request: Request, req: PredictRequest):
     except Exception as e:
         logger.exception(f"Prediction failed for session {req.session_id}")
         raise HTTPException(status_code=422, detail="The supplied values do not match the trained model schema.")
+
+
+@app.post("/predict/batch", tags=["ml"], dependencies=[Depends(require_auth)])
+@limiter.limit("30/minute")
+async def predict_batch(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    session_id: str = Header(..., alias="X-Session-Id"),
+):
+    """Run a trained model against a CSV/Excel file and return predictions as CSV."""
+    _get_session(session_id, current_owner(request))
+    model_path = os.path.join(_exports_dir(session_id), "model.joblib")
+    if not os.path.exists(model_path):
+        raise HTTPException(status_code=404, detail="No trained model found. Call /train first.")
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="Batch input must be CSV or Excel.")
+    content = await file.read(MAX_UPLOAD_MB * 1024 * 1024 + 1)
+    if len(content) > MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_UPLOAD_MB} MB limit.")
+    try:
+        input_path = os.path.join(DATA_DIR, f"batch_{uuid.uuid4()}{ext}")
+        with open(input_path, "wb") as handle:
+            handle.write(content)
+        df = _read_dataframe(input_path)
+        if df.empty:
+            raise ValueError("Batch input is empty.")
+        clf = joblib.load(model_path)
+        predictions = clf.predict(df)
+        output = df.copy()
+        output["prediction"] = [_safe_prediction_value(value) for value in predictions]
+        model_step = clf.named_steps.get("model")
+        if model_step and hasattr(clf, "predict_proba"):
+            output["confidence"] = clf.predict_proba(df).max(axis=1)
+        output_path = os.path.join(DATA_DIR, f"predictions_{uuid.uuid4()}.csv")
+        output.to_csv(output_path, index=False)
+        background_tasks.add_task(os.remove, input_path)
+        background_tasks.add_task(os.remove, output_path)
+        return FileResponse(output_path, media_type="text/csv", filename="axio_predictions.csv", background=background_tasks)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Batch prediction failed for session %s", session_id)
+        raise HTTPException(status_code=422, detail=f"Batch prediction failed: {exc}")
+
+
+@app.get("/model/{session_id}/explain", tags=["ml"], dependencies=[Depends(require_auth)])
+def explain_model(request: Request, session_id: str):
+    """Return model-level feature importance for the trained pipeline."""
+    _get_session(session_id, current_owner(request))
+    model_path = os.path.join(_exports_dir(session_id), "model.joblib")
+    if not os.path.exists(model_path):
+        raise HTTPException(status_code=404, detail="No trained model found. Call /train first.")
+    clf = joblib.load(model_path)
+    model = clf.named_steps.get("model")
+    if not hasattr(model, "feature_importances_"):
+        return {"method": "unavailable", "features": [], "message": "This model does not expose native feature importance."}
+    preprocessor = clf.named_steps.get("preprocessor")
+    names = []
+    if preprocessor is not None:
+        try:
+            names = list(preprocessor.get_feature_names_out())
+        except (AttributeError, ValueError):
+            names = []
+    values = list(model.feature_importances_)
+    if len(names) != len(values):
+        names = [f"feature_{index + 1}" for index in range(len(values))]
+    features = sorted(
+        [{"name": name.replace("num__", "").replace("cat__", ""), "importance": float(value)}
+         for name, value in zip(names, values)],
+        key=lambda item: item["importance"], reverse=True,
+    )
+    return {"method": "native_feature_importance", "features": features[:30]}
+
+
+@app.post("/monitor/drift/{session_id}", tags=["monitoring"], dependencies=[Depends(require_auth)])
+async def monitor_drift(request: Request, session_id: str, file: UploadFile = File(...)):
+    """Compare incoming data with the uploaded training profile."""
+    session = _get_session(session_id, current_owner(request))
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="Drift input must be CSV or Excel.")
+    content = await file.read(MAX_UPLOAD_MB * 1024 * 1024 + 1)
+    if len(content) > MAX_UPLOAD_MB * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"File exceeds {MAX_UPLOAD_MB} MB limit.")
+    temp_path = os.path.join(DATA_DIR, f"drift_{uuid.uuid4()}{ext}")
+    try:
+        with open(temp_path, "wb") as handle:
+            handle.write(content)
+        incoming = _read_dataframe(temp_path)
+        baseline = session.get("analysis", {}).get("profile", {})
+        missing_by_column = baseline.get("missing_by_column", {})
+        reports = []
+        for column in incoming.columns:
+            current_missing = float(incoming[column].isna().mean())
+            baseline_missing = float(missing_by_column.get(str(column), 0)) / max(session.get("analysis", {}).get("row_count", 1), 1)
+            item = {"column": str(column), "baseline_missing_rate": baseline_missing,
+                    "current_missing_rate": current_missing,
+                    "missing_rate_delta": current_missing - baseline_missing,
+                    "drifted": abs(current_missing - baseline_missing) >= 0.2}
+            if pd.api.types.is_numeric_dtype(incoming[column]):
+                stats = baseline.get("numeric_summary", {}).get(str(column), {})
+                current = pd.to_numeric(incoming[column], errors="coerce").dropna()
+                current_mean = float(current.mean()) if not current.empty else None
+                baseline_mean = stats.get("mean")
+                item.update({"baseline_mean": baseline_mean, "current_mean": current_mean})
+                if baseline_mean is not None and current_mean is not None:
+                    scale = max(abs(float(stats.get("std") or 0)), 1e-9)
+                    item["mean_shift"] = (current_mean - baseline_mean) / scale
+                    item["drifted"] = item["drifted"] or abs(item["mean_shift"]) >= 2
+            reports.append(item)
+        return {"session_id": session_id, "row_count": len(incoming), "drifted_columns": sum(item["drifted"] for item in reports), "columns": reports}
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 @app.get("/export/model/{session_id}", tags=["export"],

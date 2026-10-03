@@ -77,6 +77,12 @@ def get_user(user_id: str):
     return dict(row) if row else None
 
 
+def get_user_by_email(email: str):
+    with _connect() as conn:
+        row = conn.execute("SELECT id, email, name, created_at FROM users WHERE email = ?", (email.lower().strip(),)).fetchone()
+    return dict(row) if row else None
+
+
 def create_access_token(user: dict) -> str:
     now = datetime.now(timezone.utc)
     payload = {"sub": user["id"], "email": user["email"], "name": user["name"],

@@ -12,7 +12,6 @@ const API_KEY  = import.meta.env.VITE_API_KEY  || '';   // optional — set in .
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const CHAT_TIMEOUT_MS    = 100_000;
-const TRAIN_TIMEOUT_MS   = 120_000;
 
 export async function getProjects() { return apiFetch('/api/projects'); }
 export async function createProject(name, description = '') {
@@ -23,6 +22,17 @@ export async function getProjectDatasets(projectId) {
 }
 export async function getProjectRuns(projectId) {
   return apiFetch(`/api/projects/${encodeURIComponent(projectId)}/runs`);
+}
+export async function getProjectMembers(projectId) {
+  return apiFetch(`/api/projects/${encodeURIComponent(projectId)}/members`);
+}
+export async function addProjectMember(projectId, email, role = 'viewer') {
+  return apiFetch(`/api/projects/${encodeURIComponent(projectId)}/members`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, role }),
+  });
+}
+export async function getProjectAudit(projectId) {
+  return apiFetch(`/api/projects/${encodeURIComponent(projectId)}/audit`);
 }
 export async function getAgentRun(sessionId) {
   return apiFetch(`/agent-run/${encodeURIComponent(sessionId)}`);
@@ -163,11 +173,18 @@ export async function trainModel(sessionId, targetColumn, opts = {}) {
   };
   if (opts.modelKey) body.model_key = opts.modelKey;
 
-  return apiFetch('/train', {
+  const job = await apiFetch('/train/jobs', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
     body:    JSON.stringify(body),
-  }, TRAIN_TIMEOUT_MS);
+  }, DEFAULT_TIMEOUT_MS);
+  for (let attempt = 0; attempt < 180; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const status = await apiFetch(`/train/jobs/${encodeURIComponent(job.id)}`, {}, DEFAULT_TIMEOUT_MS);
+    if (status.status === 'completed') return status.result;
+    if (status.status === 'failed') throw new ApiError(status.error || 'Training failed.', 422, status.error);
+  }
+  throw new ApiError('Training timed out', 408, 'timeout');
 }
 
 /**
@@ -181,6 +198,30 @@ export async function predict(sessionId, features) {
       body:    JSON.stringify({ session_id: sessionId, features }),
     })
   );
+}
+
+export async function batchPredict(sessionId, file) {
+  const response = await fetch(`${API_BASE}/predict/batch`, {
+    method: 'POST',
+    headers: authHeaders({ 'X-Session-Id': sessionId }),
+    body: (() => { const form = new FormData(); form.append('file', file); return form; })(),
+  });
+  if (!response.ok) {
+    let detail = response.statusText;
+    try { detail = (await response.json()).detail ?? detail; } catch (parseError) { void parseError; }
+    throw new ApiError(`API error ${response.status}: ${detail}`, response.status, detail);
+  }
+  return response.blob();
+}
+
+export async function explainModel(sessionId) {
+  return apiFetch(`/model/${encodeURIComponent(sessionId)}/explain`);
+}
+
+export async function checkDrift(sessionId, file) {
+  const form = new FormData();
+  form.append('file', file);
+  return apiFetch(`/monitor/drift/${encodeURIComponent(sessionId)}`, { method: 'POST', body: form });
 }
 
 /**
