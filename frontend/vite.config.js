@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig(({ mode }) => {
-  const apiTarget = loadEnv(mode, '.', '').VITE_DEV_API_TARGET || 'http://127.0.0.1:8001'
+  const apiTarget = loadEnv(mode, '.', '').VITE_DEV_API_TARGET || 'http://127.0.0.1:8000'
   return {
     plugins: [react(), tailwindcss()],
     server: {
@@ -15,6 +15,8 @@ export default defineConfig(({ mode }) => {
         '/upload':  { target: apiTarget, changeOrigin: true },
         '/train':   { target: apiTarget, changeOrigin: true },
         '/predict': { target: apiTarget, changeOrigin: true },
+        '/model':   { target: apiTarget, changeOrigin: true },
+        '/monitor': { target: apiTarget, changeOrigin: true },
         '/chat':    { target: apiTarget, changeOrigin: true },
         '/export':  { target: apiTarget, changeOrigin: true },
         '/session': { target: apiTarget, changeOrigin: true },
