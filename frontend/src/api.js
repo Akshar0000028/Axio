@@ -23,6 +23,10 @@ export async function getProjectDatasets(projectId) {
 export async function getProjectRuns(projectId) {
   return apiFetch(`/api/projects/${encodeURIComponent(projectId)}/runs`);
 }
+export async function compareProjectRuns(projectId, runIds = []) {
+  const query = runIds.length ? `?run_ids=${encodeURIComponent(runIds.join(','))}` : '';
+  return apiFetch(`/api/projects/${encodeURIComponent(projectId)}/runs/compare${query}`);
+}
 export async function getProjectMembers(projectId) {
   return apiFetch(`/api/projects/${encodeURIComponent(projectId)}/members`);
 }

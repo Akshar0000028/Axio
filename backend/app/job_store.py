@@ -29,7 +29,7 @@ def init_job_db():
             request TEXT NOT NULL, result TEXT, error TEXT,
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         )""")
-        conn.execute("UPDATE training_jobs SET status='failed', error='Worker restarted before completion', updated_at=? WHERE status='running'",
+        conn.execute("UPDATE training_jobs SET status='queued', error=NULL, updated_at=? WHERE status IN ('running', 'queued')",
                      (datetime.utcnow().isoformat(),))
         conn.commit()
 
@@ -73,3 +73,9 @@ def get_job(job_id, owner_id=None):
     result["request"] = json.loads(result["request"])
     result["result"] = json.loads(result["result"]) if result["result"] else None
     return result
+
+
+def list_pending_jobs():
+    with _connect() as conn:
+        rows = conn.execute("SELECT id FROM training_jobs WHERE status IN ('queued', 'running') ORDER BY created_at").fetchall()
+    return [get_job(row["id"]) for row in rows]

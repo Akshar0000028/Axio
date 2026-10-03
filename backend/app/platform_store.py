@@ -70,6 +70,12 @@ def get_project(project_id: str, owner_id: str):
         ).fetchone()
     return dict(row) if row else None
 
+
+def get_project_role(project_id: str, user_id: str):
+    with _connect() as conn:
+        row = conn.execute("SELECT role FROM project_members WHERE project_id=? AND user_id=?", (project_id, user_id)).fetchone()
+    return row["role"] if row else None
+
 def create_project(name: str, description: str, owner_id: str):
     now = datetime.utcnow().isoformat()
     project = {"id": str(uuid.uuid4()), "name": name.strip(), "description": description.strip(),

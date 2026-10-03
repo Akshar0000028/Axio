@@ -40,14 +40,14 @@ from .agents import build_agent_run
 from .session_store import SessionStore
 from .database import init_db, save_message, get_history, get_sessions
 from .platform_store import (
-    init_platform_db, list_projects, create_project, get_project, add_member, list_members, list_audit, record_audit,
+    init_platform_db, list_projects, create_project, get_project, get_project_role, add_member, list_members, list_audit, record_audit,
     register_dataset, list_datasets, get_dataset_by_session, register_run, list_runs,
 )
 from .auth_store import (
     JWT_EXPIRE_MINUTES, authenticate_user, create_access_token, create_user,
     decode_access_token, init_auth_db, get_user_by_email,
 )
-from .job_store import init_job_db, create_job, update_job, get_job
+from .job_store import init_job_db, create_job, update_job, get_job, list_pending_jobs
 
 init_db()
 init_auth_db()
@@ -135,6 +135,11 @@ app.add_middleware(
 )
 
 _executor = ThreadPoolExecutor(max_workers=int(os.getenv("TRAIN_WORKERS", "4")))
+
+
+def _ensure_project_editor(project_id: str | None, owner_id: str):
+    if project_id and get_project_role(project_id, owner_id) not in ("owner", "editor"):
+        raise HTTPException(status_code=403, detail="Editor access is required for this action.")
 
 # ── Auth dependency ───────────────────────────────────────────────────────────
 
@@ -428,6 +433,24 @@ def project_runs(request: Request, project_id: str):
     return list_runs(project_id, owner_id)
 
 
+@app.get("/api/projects/{project_id}/runs/compare", tags=["platform"], dependencies=[Depends(require_auth)])
+def compare_project_runs(request: Request, project_id: str, run_ids: str | None = None):
+    if not get_project(project_id, current_owner(request)):
+        raise HTTPException(status_code=404, detail="Project not found in this workspace.")
+    runs = list_runs(project_id, current_owner(request))
+    selected = set(run_ids.split(",")) if run_ids else None
+    if selected:
+        runs = [run for run in runs if run["id"] in selected]
+    runs = runs[:10]
+    metric_names = sorted({key for run in runs for key, value in run["metrics"].items() if isinstance(value, (int, float))})
+    best = {}
+    for metric in metric_names:
+        values = [(run["id"], run["metrics"].get(metric)) for run in runs if isinstance(run["metrics"].get(metric), (int, float))]
+        if values:
+            best[metric] = max(values, key=lambda pair: pair[1])[0]
+    return {"runs": runs, "metrics": metric_names, "best_run_by_metric": best}
+
+
 @app.post("/upload", response_model=AnalyzeResponse, tags=["data"],
           dependencies=[Depends(require_auth)])
 @limiter.limit("30/minute")
@@ -436,6 +459,7 @@ async def upload_dataset(request: Request, file: UploadFile = File(...)):
     owner_id = current_owner(request)
     if project_id and not get_project(project_id, owner_id):
         raise HTTPException(status_code=404, detail="Project not found in this workspace.")
+    _ensure_project_editor(project_id, owner_id)
 
     ext = os.path.splitext(file.filename or "")[-1].lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -572,6 +596,7 @@ def get_session_history(request: Request, session_id: str):
 @limiter.limit("10/minute")
 async def train_model(request: Request, req: TrainRequest):
     session = _get_session(req.session_id, current_owner(request))
+    _ensure_project_editor(session.get("project_id"), current_owner(request))
     df = _read_dataframe(session["filepath"])
     try:
         loop = asyncio.get_event_loop()
@@ -641,10 +666,22 @@ def _run_training_job(job_id: str, req: TrainRequest, owner_id: str):
         update_job(job_id, status="failed", progress=100, error=str(exc))
 
 
+@app.on_event("startup")
+def resume_training_jobs():
+    for job in list_pending_jobs():
+        try:
+            request = TrainRequest(**job["request"])
+            _executor.submit(_run_training_job, job["id"], request, job["owner_id"])
+        except Exception as exc:
+            logger.exception("Could not resume training job %s", job["id"])
+            update_job(job["id"], status="failed", progress=100, error=str(exc))
+
+
 @app.post("/train/jobs", response_model=TrainingJobResponse, tags=["ml"], dependencies=[Depends(require_auth)])
 @limiter.limit("10/minute")
 def create_training_job(request: Request, req: TrainRequest):
     session = _get_session(req.session_id, current_owner(request))
+    _ensure_project_editor(session.get("project_id"), current_owner(request))
     job = create_job(req.session_id, current_owner(request), session.get("project_id"), req.model_dump())
     _executor.submit(_run_training_job, job["id"], req, current_owner(request))
     return job

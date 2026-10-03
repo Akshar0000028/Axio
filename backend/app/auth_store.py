@@ -11,6 +11,8 @@ import jwt
 BASE_DIR = os.path.dirname(__file__)
 DB_PATH = os.path.join(BASE_DIR, "..", "data", "platform.db")
 JWT_SECRET = os.getenv("JWT_SECRET", "dev-only-change-this-jwt-secret")
+if os.getenv("ENV", "production") == "production" and len(JWT_SECRET) < 32:
+    raise RuntimeError("JWT_SECRET must be at least 32 characters in production.")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))
 JWT_ISSUER = os.getenv("JWT_ISSUER", "axio")
