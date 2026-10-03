@@ -72,6 +72,31 @@ curl http://localhost:8000/health
 # {"status":"ok","sessions_active":0,"session_backend":"redis","auth_enabled":true}
 ```
 
+## Platform capabilities
+
+Axio supports:
+
+- Dataset profiling with missing-value, duplicate, constant-column, and small-sample warnings.
+- Asynchronous training through `POST /train/jobs` and `GET /train/jobs/{job_id}`.
+- Versioned project runs and comparison through `/api/projects/{id}/runs/compare`.
+- Batch prediction through `POST /predict/batch` with an `X-Session-Id` header.
+- Model explanations through `/model/{session_id}/explain` and drift checks through `/monitor/drift/{session_id}`.
+- Project members, viewer/editor permissions, and audit history through `/api/projects/{id}/members` and `/api/projects/{id}/audit`.
+
+Training and upload mutations require project owner/editor access. Production startup rejects JWT secrets shorter than 32 characters.
+
+## Verification
+
+```bash
+cd backend
+python -m unittest discover -s tests -v
+python smoke_test.py
+
+cd ../frontend
+npm run lint
+npm run build
+```
+
 `session_backend` will show `"redis"` when connected or `"memory"` as fallback.
 
 ## JWT authentication
