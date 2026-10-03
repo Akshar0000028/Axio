@@ -8,7 +8,7 @@ import AxioChat from './AxioChat';
 import ProjectDashboard from './ProjectDashboard';
 import ProjectWorkspace from './ProjectWorkspace';
 import AuthScreen from './AuthScreen';
-import { getAccessToken } from './api';
+import { clearAccessToken, getAccessToken } from './api';
 import LandingDetail from './LandingDetail';
 
 function Footer({ onNavigate }) {
@@ -52,6 +52,12 @@ export default function App() {
     window.addEventListener('hashchange', syncPage);
     syncPage();
     return () => { window.removeEventListener('popstate', syncPage); window.removeEventListener('hashchange', syncPage); };
+  }, []);
+
+  useEffect(() => {
+    const expire = () => { clearAccessToken(); setUser(null); setActiveProject(null); };
+    window.addEventListener('axio-auth-expired', expire);
+    return () => window.removeEventListener('axio-auth-expired', expire);
   }, []);
 
   const navigate = page => {

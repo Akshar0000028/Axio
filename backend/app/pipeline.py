@@ -208,14 +208,25 @@ def train_pipeline(
     if target_column not in df.columns:
         raise ValueError(f"Target column '{target_column}' not found. Available: {list(df.columns)}")
 
+    if df.empty or len(df) < 2:
+        raise ValueError("The dataset must contain at least 2 rows.")
+    if df[target_column].isna().any():
+        raise ValueError(f"Target column '{target_column}' contains missing values. Remove or fill them before training.")
+
     # ── Drop ID-like columns silently ──────────────────────────────────────
-    cols_to_drop = [c for c in df.columns if c != target_column and _is_likely_id_column(c, df[c])]
+    candidate_drop = [c for c in df.columns if c != target_column and _is_likely_id_column(c, df[c])]
+    # Never remove every predictor. A single sequential numeric feature can be
+    # a legitimate measurement, not an ID.
+    cols_to_drop = candidate_drop if len(candidate_drop) < len(df.columns) - 1 else []
     if cols_to_drop:
         logger.info(f"Dropping ID-like columns: {cols_to_drop}")
         df = df.drop(columns=cols_to_drop)
 
     y = df[target_column]
     X = df.drop(columns=[target_column])
+
+    if X.shape[1] == 0:
+        raise ValueError("The dataset must contain at least one feature column besides the target.")
 
     # Coerce dtypes: bool → int, fully-numeric objects → float
     X = _coerce_dtypes(X)
@@ -242,6 +253,9 @@ def train_pipeline(
         X_train = X_train.drop(columns=high_missing)
         X_test = X_test.drop(columns=high_missing)
         X = X.drop(columns=high_missing)  # for cv_scores later
+
+    if X_train.shape[1] == 0:
+        raise ValueError("All feature columns are unusable after missing-value filtering.")
 
     # ── Build pipeline ─────────────────────────────────────────────────────
     preprocessor, numeric_features, categorical_features = _build_preprocessor(X_train)

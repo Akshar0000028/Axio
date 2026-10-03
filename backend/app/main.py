@@ -454,7 +454,10 @@ def chat_endpoint(request: Request, req: ChatRequest):
     
     # Save user message
     session_label = context.get("filename", "New Conversation")
-    save_message(req.session_id, "user", req.message, session_label=session_label, owner_id=current_owner(request))
+    conversation_id = req.conversation_id or req.session_id
+    save_message(conversation_id, "user", req.message, session_label=session_label,
+                 owner_id=current_owner(request), project_id=context.get("project_id"),
+                 dataset_session_id=req.session_id)
     
     response = generate_chat_response(req.message, req.history, context)
     response.charts = _chart_for_request(req.message, context)
@@ -493,17 +496,19 @@ def chat_endpoint(request: Request, req: ChatRequest):
     
     # Save assistant message
     metrics_dicts = [{"label": m.label, "value": m.value, "delta": m.delta} for m in response.metrics]
-    save_message(req.session_id, "assistant", response.content, actions=response.actions, metrics=metrics_dicts, session_label=session_label, owner_id=current_owner(request))
+    save_message(conversation_id, "assistant", response.content, actions=response.actions,
+                 metrics=metrics_dicts, session_label=session_label,
+                 owner_id=current_owner(request), project_id=context.get("project_id"),
+                 dataset_session_id=req.session_id)
     
     return response
 
 @app.get("/chat/sessions", tags=["ai"], dependencies=[Depends(require_auth)])
-def list_sessions(request: Request):
-    return get_sessions(current_owner(request))
+def list_sessions(request: Request, project_id: str | None = None):
+    return get_sessions(current_owner(request), project_id)
 
 @app.get("/chat/history/{session_id}", tags=["ai"], dependencies=[Depends(require_auth)])
 def get_session_history(request: Request, session_id: str):
-    _get_session(session_id, current_owner(request))
     return get_history(session_id, current_owner(request))
 
 

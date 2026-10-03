@@ -14,12 +14,18 @@ def init_db():
                 session_id TEXT PRIMARY KEY,
                 label TEXT,
                 owner_id TEXT,
+                project_id TEXT,
+                dataset_session_id TEXT,
                 updated_at DATETIME
             )
         ''')
         columns = {row[1] for row in conn.execute("PRAGMA table_info(chat_sessions)").fetchall()}
         if "owner_id" not in columns:
             conn.execute("ALTER TABLE chat_sessions ADD COLUMN owner_id TEXT")
+        if "project_id" not in columns:
+            conn.execute("ALTER TABLE chat_sessions ADD COLUMN project_id TEXT")
+        if "dataset_session_id" not in columns:
+            conn.execute("ALTER TABLE chat_sessions ADD COLUMN dataset_session_id TEXT")
         conn.execute('''
             CREATE TABLE IF NOT EXISTS chat_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,14 +40,17 @@ def init_db():
         ''')
         conn.commit()
 
-def save_message(session_id: str, role: str, content: str, actions: list = None, metrics: list = None, session_label: str = "Chat Session", owner_id: str = None):
+def save_message(session_id: str, role: str, content: str, actions: list = None, metrics: list = None, session_label: str = "Chat Session", owner_id: str = None, project_id: str = None, dataset_session_id: str = None):
     with sqlite3.connect(DB_PATH) as conn:
         # Upsert session
         conn.execute('''
-            INSERT INTO chat_sessions (session_id, label, owner_id, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(session_id) DO UPDATE SET updated_at=excluded.updated_at, owner_id=COALESCE(chat_sessions.owner_id, excluded.owner_id)
-        ''', (session_id, session_label, owner_id, datetime.utcnow().isoformat()))
+            INSERT INTO chat_sessions (session_id, label, owner_id, project_id, dataset_session_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET updated_at=excluded.updated_at,
+              owner_id=COALESCE(chat_sessions.owner_id, excluded.owner_id),
+              project_id=COALESCE(chat_sessions.project_id, excluded.project_id),
+              dataset_session_id=COALESCE(chat_sessions.dataset_session_id, excluded.dataset_session_id)
+        ''', (session_id, session_label, owner_id, project_id, dataset_session_id, datetime.utcnow().isoformat()))
         
         # Insert message
         actions_str = json.dumps(actions or [])
@@ -74,8 +83,10 @@ def get_history(session_id: str, owner_id: str = None) -> list:
             for row in rows
         ]
 
-def get_sessions(owner_id: str = None) -> list:
+def get_sessions(owner_id: str = None, project_id: str = None) -> list:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        rows = conn.execute('SELECT * FROM chat_sessions WHERE (? IS NULL OR owner_id = ?) ORDER BY updated_at DESC', (owner_id, owner_id)).fetchall()
+        rows = conn.execute('''SELECT * FROM chat_sessions
+            WHERE (? IS NULL OR owner_id = ?) AND (? IS NULL OR project_id = ?)
+            ORDER BY updated_at DESC''', (owner_id, owner_id, project_id, project_id)).fetchall()
         return [dict(row) for row in rows]

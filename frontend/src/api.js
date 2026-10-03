@@ -73,6 +73,10 @@ async function apiFetch(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
     });
 
     if (!res.ok) {
+      if (res.status === 401) {
+        clearAccessToken();
+        window.dispatchEvent(new Event('axio-auth-expired'));
+      }
       let detail = res.statusText;
       try { detail = (await res.json()).detail ?? detail; } catch (parseError) { void parseError; /* non-JSON error response */ }
       throw new ApiError(`API error ${res.status}: ${detail}`, res.status, detail);
@@ -182,11 +186,11 @@ export async function predict(sessionId, features) {
 /**
  * Send a chat message to the Axio ML Agent.
  */
-export async function sendChatMessage(sessionId, message, history = []) {
+export async function sendChatMessage(sessionId, message, history = [], conversationId = null) {
   return apiFetch('/chat', {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ session_id: sessionId, message, history }),
+    body:    JSON.stringify({ session_id: sessionId, message, history, ...(conversationId ? { conversation_id: conversationId } : {}) }),
   }, CHAT_TIMEOUT_MS);
 }
 
@@ -222,8 +226,8 @@ export async function downloadModel(sessionId) {
 /**
  * Fetch past chat sessions.
  */
-export async function getChatSessions() {
-  return apiFetch('/chat/sessions');
+export async function getChatSessions(projectId = '') {
+  return apiFetch(`/chat/sessions${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ''}`);
 }
 
 /**

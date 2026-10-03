@@ -3,7 +3,7 @@ import { Send, Bot, User, Loader, BarChart3, Download } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { sendChatMessage, downloadModel } from './api';
 
-export default function ChatPanel({ sessionId, initialMessages = [], onMessageSent }) {
+export default function ChatPanel({ sessionId, conversationId = null, initialMessages = [], onMessageSent }) {
   const [messages, setMessages] = useState(initialMessages);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -20,7 +20,7 @@ export default function ChatPanel({ sessionId, initialMessages = [], onMessageSe
     setLoading(true);
     try {
       const history = messages.map(item => ({ role: item.role, content: item.content }));
-      const response = await sendChatMessage(sessionId, message, history);
+      const response = await sendChatMessage(sessionId, message, history, conversationId);
       setMessages(previous => [...previous, { role: 'assistant', ...response }]);
       onMessageSent?.();
     } catch (error) {

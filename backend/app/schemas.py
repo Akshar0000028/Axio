@@ -113,6 +113,7 @@ class ChatRequest(BaseModel):
     session_id: str
     message: str
     history: List[ChatMessage] = []
+    conversation_id: Optional[str] = None
 
     @field_validator("message")
     @classmethod

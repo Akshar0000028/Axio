@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Bot, MessageSquare, Plus, Loader } from 'lucide-react';
 import ChatPanel from './ChatPanel';
 import DataUploader from './DataUploader';
@@ -6,6 +6,7 @@ import { getProjectDatasets, getChatSessions, getChatHistory } from './api';
 
 export default function ProjectWorkspace({ project, onBack }) {
   const [session, setSession] = useState(null);
+  const [datasets, setDatasets] = useState([]);
   const [loadError, setLoadError] = useState(null);
   const [conversations, setConversations] = useState([]);
   const [activeConversation, setActiveConversation] = useState(null);
@@ -15,16 +16,18 @@ export default function ProjectWorkspace({ project, onBack }) {
 
   useEffect(() => {
     getProjectDatasets(project.id)
-      .then(items => { if (items[0]) setSession(toSession(items[0])); })
+      .then(items => { setDatasets(items); if (items[0]) setSession(toSession(items[0])); })
       .catch(error => setLoadError(error.message));
   }, [project.id]);
 
-  const refreshConversations = () => getChatSessions().then(setConversations).catch(() => {});
+  const refreshConversations = useCallback(() => getChatSessions(project.id).then(setConversations).catch(() => {}), [project.id]);
 
-  useEffect(() => { refreshConversations(); }, []);
+  useEffect(() => { refreshConversations(); }, [refreshConversations]);
 
   const openConversation = async conversation => {
     setActiveConversation(conversation.session_id);
+    const dataset = datasets.find(item => item.session_id === conversation.dataset_session_id);
+    if (dataset) setSession(toSession(dataset));
     setHistoryLoading(true);
     try {
       const items = await getChatHistory(conversation.session_id);
@@ -52,7 +55,7 @@ export default function ProjectWorkspace({ project, onBack }) {
 
     <div className="chat-workspace-body">
       <aside className="conversation-sidebar" aria-label="Conversation history">
-        <button className="conversation-new" onClick={() => { setActiveConversation(session?.session_id ?? null); setHistory([]); setConversationNonce(value => value + 1); }}><Plus size={15} /> New conversation</button>
+        <button className="conversation-new" onClick={() => { setActiveConversation(session ? crypto.randomUUID() : null); setHistory([]); setConversationNonce(value => value + 1); }} disabled={!session}><Plus size={15} /> New conversation</button>
         <DataUploader projectId={project.id} onUploadSuccess={onUpload} compact />
         <div className="conversation-sidebar-label">Recent conversations</div>
         <div className="conversation-list">
@@ -68,7 +71,7 @@ export default function ProjectWorkspace({ project, onBack }) {
       {loadError && <div className="chat-only-error" role="alert">Couldn’t load this project’s data: {loadError}</div>}
 
       {session ? <>
-        {historyLoading ? <div className="conversation-loading"><Loader size={16} className="animate-spin" /> Loading conversation…</div> : <ChatPanel key={`${activeConversation || session.session_id}-${conversationNonce}`} sessionId={activeConversation || session.session_id} initialMessages={history} onMessageSent={refreshConversations} />}
+        {historyLoading ? <div className="conversation-loading"><Loader size={16} className="animate-spin" /> Loading conversation…</div> : <ChatPanel key={`${activeConversation || session.session_id}-${conversationNonce}`} sessionId={session.session_id} conversationId={activeConversation && activeConversation !== session.session_id ? activeConversation : null} initialMessages={history} onMessageSent={refreshConversations} />}
       </> : <div className="chat-only-start">
         <div className="chat-only-upload"><DataUploader projectId={project.id} onUploadSuccess={onUpload} /></div>
         <span className="chat-only-hint">CSV and Excel files · up to 50 MB</span>
