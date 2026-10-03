@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import HeroSection from './HeroSection';
 import WorkflowSection from './WorkflowSection';
 import FeaturesSection from './FeaturesSection';
@@ -7,8 +7,11 @@ import CTASection from './CTASection';
 import AxioChat from './AxioChat';
 import ProjectDashboard from './ProjectDashboard';
 import ProjectWorkspace from './ProjectWorkspace';
+import AuthScreen from './AuthScreen';
+import { getAccessToken } from './api';
+import LandingDetail from './LandingDetail';
 
-function Footer() {
+function Footer({ onNavigate }) {
   return (
     <footer style={{
       borderTop: '1px solid rgba(255,255,255,0.08)',
@@ -25,12 +28,12 @@ function Footer() {
       </span>
       <div className="flex items-center" style={{ gap: 24 }}>
         {['Privacy', 'Terms', 'Docs'].map(link => (
-          <a key={link} href="#" style={{ fontSize: 13, color: 'rgba(255,255,255,0.45)', textDecoration: 'none', transition: 'color 0.2s' }}
+          <button key={link} onClick={() => onNavigate(link.toLowerCase())} style={{ background: 'none', border: 0, cursor: 'pointer', fontSize: 13, color: 'rgba(255,255,255,0.45)', textDecoration: 'none', transition: 'color 0.2s' }}
             onMouseEnter={e => e.currentTarget.style.color = '#fff'}
             onMouseLeave={e => e.currentTarget.style.color = 'rgba(255,255,255,0.45)'}
           >
             {link}
-          </a>
+          </button>
         ))}
       </div>
     </footer>
@@ -40,20 +43,40 @@ function Footer() {
 export default function App() {
   const [showApp, setShowApp] = useState(false);
   const [activeProject, setActiveProject] = useState(null);
+  const [user, setUser] = useState(null);
+  const [landingPage, setLandingPage] = useState('home');
+
+  useEffect(() => {
+    const syncPage = () => setLandingPage(window.location.hash.replace('#', '') || 'home');
+    window.addEventListener('popstate', syncPage);
+    window.addEventListener('hashchange', syncPage);
+    syncPage();
+    return () => { window.removeEventListener('popstate', syncPage); window.removeEventListener('hashchange', syncPage); };
+  }, []);
+
+  const navigate = page => {
+    if (page === 'workspace') { setShowApp(true); return; }
+    setLandingPage(page);
+    window.history.pushState({ page }, '', page === 'home' ? '#' : `#${page}`);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   if (showApp) {
+    if (!getAccessToken() && !user) return <AuthScreen onAuthenticated={setUser} onBack={() => setShowApp(false)} />;
     if (activeProject) return <ProjectWorkspace project={activeProject} onBack={() => setActiveProject(null)} />;
     return <ProjectDashboard onBack={() => setShowApp(false)} onOpenProject={setActiveProject} />;
   }
 
+  if (landingPage !== 'home') return <LandingDetail page={landingPage} onBack={() => navigate('home')} onNavigate={navigate} />;
+
   return (
     <div style={{ fontFamily: "'General Sans', system-ui, sans-serif" }}>
-      <HeroSection onEnterApp={() => setShowApp(true)} />
-      <WorkflowSection />
+      <HeroSection onEnterApp={() => navigate('workspace')} onNavigate={navigate} />
+      <WorkflowSection onNavigate={navigate} />
       <StatsSection />
-      <FeaturesSection />
-      <CTASection onEnterApp={() => setShowApp(true)} />
-      <Footer />
+      <FeaturesSection onNavigate={navigate} />
+      <CTASection onEnterApp={() => navigate('workspace')} />
+      <Footer onNavigate={navigate} />
     </div>
   );
 }

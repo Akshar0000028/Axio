@@ -74,6 +74,10 @@ curl http://localhost:8000/health
 
 `session_backend` will show `"redis"` when connected or `"memory"` as fallback.
 
+## JWT authentication
+
+Users register or sign in through `/auth/register` and `/auth/login`. The API returns a bearer access token; send it as `Authorization: Bearer <token>` on protected requests. The frontend stores this token locally and attaches it automatically. Set `JWT_SECRET` to a strong random value in production; rotating it invalidates existing tokens.
+
 ---
 
 ## Nginx

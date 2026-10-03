@@ -7,6 +7,7 @@
  */
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
+const TOKEN_KEY = 'axio_access_token';
 const API_KEY  = import.meta.env.VITE_API_KEY  || '';   // optional — set in .env
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -39,9 +40,21 @@ export class ApiError extends Error {
 
 // ── Auth headers helper ────────────────────────────────────────────────────
 function authHeaders(extra = {}) {
-  return API_KEY
-    ? { 'X-API-Key': API_KEY, ...extra }
-    : { ...extra };
+  const token = localStorage.getItem(TOKEN_KEY);
+  return { ...(API_KEY ? { 'X-API-Key': API_KEY } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}), ...extra };
+}
+
+export function getAccessToken() { return localStorage.getItem(TOKEN_KEY); }
+export function clearAccessToken() { localStorage.removeItem(TOKEN_KEY); }
+export async function registerUser(email, name, password) {
+  const result = await apiFetch('/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, name, password }) });
+  localStorage.setItem(TOKEN_KEY, result.access_token);
+  return result;
+}
+export async function loginUser(email, password) {
+  const result = await apiFetch('/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+  localStorage.setItem(TOKEN_KEY, result.access_token);
+  return result;
 }
 
 // ── Core fetch wrapper ─────────────────────────────────────────────────────
@@ -108,8 +121,8 @@ export async function uploadDataset(file, onProgress, projectId = '') {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', `${API_BASE}/upload`);
-      // Attach API key to XHR as well
-      if (API_KEY) xhr.setRequestHeader('X-API-Key', API_KEY);
+      // Attach the same auth headers to XHR uploads.
+      Object.entries(authHeaders()).forEach(([key, value]) => xhr.setRequestHeader(key, value));
       if (projectId) xhr.setRequestHeader('X-Project-Id', projectId);
       xhr.upload.onprogress = e => {
         if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));

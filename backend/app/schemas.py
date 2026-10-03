@@ -185,3 +185,50 @@ class RunResponse(BaseModel):
     problem_type: str
     metrics: Dict[str, Any]
     created_at: str
+
+
+class RegisterRequest(BaseModel):
+    email: str
+    name: str
+    password: str
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, v: str) -> str:
+        value = v.strip().lower()
+        if "@" not in value or len(value) > 254:
+            raise ValueError("A valid email address is required")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def valid_name(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Name is required")
+        return v.strip()[:120]
+
+    @field_validator("password")
+    @classmethod
+    def valid_password(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters")
+        return v
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    name: str
+    created_at: str
+
+
+class AuthResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    user: UserResponse

@@ -23,6 +23,8 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - ENV=production
       - AXIO_API_KEY=${AXIO_API_KEY:-}
+      - JWT_SECRET=${JWT_SECRET:?Set a strong JWT_SECRET before starting Axio}
+      - JWT_EXPIRE_MINUTES=${JWT_EXPIRE_MINUTES:-1440}
       - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
     volumes:
       - axio-data:/app/backend/data

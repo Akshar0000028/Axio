@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.security import APIKeyHeader
+from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -29,6 +29,7 @@ from .schemas import (
     AnalyzeResponse, TrainRequest, TrainResponse,
     PredictRequest, PredictResponse,
     ChatRequest, ChatResponse, ChartDisplay, MetricDisplay, ProjectCreate, ProjectResponse, DatasetResponse, RunResponse,
+    RegisterRequest, LoginRequest, AuthResponse, UserResponse,
 )
 from .pipeline import analyze_dataset_pipeline, train_pipeline
 from .ml_agent import generate_chat_response
@@ -39,9 +40,14 @@ from .platform_store import (
     init_platform_db, list_projects, create_project, get_project,
     register_dataset, list_datasets, get_dataset_by_session, register_run, list_runs,
 )
+from .auth_store import (
+    JWT_EXPIRE_MINUTES, authenticate_user, create_access_token, create_user,
+    decode_access_token, init_auth_db,
+)
 
 init_db()
 init_platform_db()
+init_auth_db()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -60,6 +66,7 @@ IS_PROD = os.getenv("ENV", "production") == "production"
 
 AXIO_API_KEY = os.getenv("AXIO_API_KEY", "")
 API_KEY_HEADER = APIKeyHeader(name="X-API-Key", auto_error=False)
+BEARER_SCHEME = HTTPBearer(auto_error=False)
 
 SESSION_TTL_HOURS = int(os.getenv("SESSION_TTL_HOURS", "24"))
 ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls"}
@@ -120,14 +127,34 @@ async def verify_api_key(api_key: str = Depends(API_KEY_HEADER)):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _get_session(session_id: str) -> dict:
+async def require_auth(request: Request, api_key: str = Depends(API_KEY_HEADER), credentials: HTTPAuthorizationCredentials | None = Depends(BEARER_SCHEME)):
+    if AXIO_API_KEY and api_key and secrets.compare_digest(api_key, AXIO_API_KEY):
+        request.state.user = {"id": "api-key", "email": "service@axio.local", "name": "API service"}
+        return request.state.user
+    if credentials and credentials.scheme.lower() == "bearer":
+        user = decode_access_token(credentials.credentials)
+        if user:
+            request.state.user = user
+            return user
+    raise HTTPException(status_code=401, detail="Authentication required.", headers={"WWW-Authenticate": "Bearer"})
+
+
+def current_owner(request: Request) -> str:
+    return request.state.user["id"]
+
+
+def _get_session(session_id: str, owner_id: str | None = None) -> dict:
     session = store.get(session_id)
+    if session and owner_id and session.get("owner_id") != owner_id:
+        raise HTTPException(status_code=403, detail="You do not have access to this session.")
     if session:
         return session
 
     # Redis is optional in local development. Recover project-backed sessions
     # after a restart when the in-memory fallback has been cleared.
     dataset = get_dataset_by_session(session_id)
+    if dataset and owner_id and dataset.get("owner_id") != owner_id:
+        raise HTTPException(status_code=403, detail="You do not have access to this session.")
     if dataset:
         safe_name = secure_filename(dataset["filename"] or "upload")
         filepath = os.path.join(DATA_DIR, f"{session_id}_{safe_name}")
@@ -270,65 +297,89 @@ def _feature_stats_content(session: dict) -> str:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+@app.post("/auth/register", response_model=AuthResponse, tags=["auth"])
+def register(payload: RegisterRequest):
+    user = create_user(payload.email, payload.name, payload.password)
+    if not user:
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+    return AuthResponse(access_token=create_access_token(user), expires_in=JWT_EXPIRE_MINUTES * 60,
+                        user=UserResponse(**user))
+
+
+@app.post("/auth/login", response_model=AuthResponse, tags=["auth"])
+def login(payload: LoginRequest):
+    user = authenticate_user(payload.email, payload.password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid email or password.", headers={"WWW-Authenticate": "Bearer"})
+    return AuthResponse(access_token=create_access_token(user), expires_in=JWT_EXPIRE_MINUTES * 60,
+                        user=UserResponse(**user))
+
+
+@app.get("/auth/me", response_model=UserResponse, tags=["auth"], dependencies=[Depends(require_auth)])
+def me(request: Request):
+    return UserResponse(**request.state.user)
+
+
 @app.get("/health", tags=["system"])
 def health_check():
     return {
         "status": "ok",
         "sessions_active": store.count(),
         "session_backend": store.backend_name(),
-        "auth_enabled": bool(AXIO_API_KEY),
+        "auth_enabled": True,
+        "jwt_auth": True,
     }
 
 
 @app.get("/agent-run/{session_id}", tags=["orchestration"],
-         dependencies=[Depends(verify_api_key)])
-def agent_run_status(session_id: str):
+         dependencies=[Depends(require_auth)])
+def agent_run_status(request: Request, session_id: str):
     """Expose the LangGraph-compatible agent state for the workspace UI."""
-    return build_agent_run(_get_session(session_id))
+    return build_agent_run(_get_session(session_id, current_owner(request)))
 
 
 @app.get("/api/projects", response_model=list[ProjectResponse], tags=["platform"],
-         dependencies=[Depends(verify_api_key)])
+         dependencies=[Depends(require_auth)])
 def projects_list(request: Request):
     """List projects for the current workspace placeholder.
 
     X-Workspace-Id is intentionally temporary until user authentication lands.
     """
-    owner_id = request.headers.get("X-Workspace-Id", "local-workspace")
+    owner_id = current_owner(request)
     return list_projects(owner_id)
 
 
 @app.post("/api/projects", response_model=ProjectResponse, tags=["platform"],
-          dependencies=[Depends(verify_api_key)])
+          dependencies=[Depends(require_auth)])
 def projects_create(request: Request, payload: ProjectCreate):
-    owner_id = request.headers.get("X-Workspace-Id", "local-workspace")
+    owner_id = current_owner(request)
     return create_project(payload.name, payload.description, owner_id)
 
 
 @app.get("/api/projects/{project_id}/datasets", response_model=list[DatasetResponse], tags=["platform"],
-         dependencies=[Depends(verify_api_key)])
+         dependencies=[Depends(require_auth)])
 def project_datasets(request: Request, project_id: str):
-    owner_id = request.headers.get("X-Workspace-Id", "local-workspace")
+    owner_id = current_owner(request)
     if not get_project(project_id, owner_id):
         raise HTTPException(status_code=404, detail="Project not found in this workspace.")
     return list_datasets(project_id, owner_id)
 
 
 @app.get("/api/projects/{project_id}/runs", response_model=list[RunResponse], tags=["platform"],
-         dependencies=[Depends(verify_api_key)])
+         dependencies=[Depends(require_auth)])
 def project_runs(request: Request, project_id: str):
-    owner_id = request.headers.get("X-Workspace-Id", "local-workspace")
+    owner_id = current_owner(request)
     if not get_project(project_id, owner_id):
         raise HTTPException(status_code=404, detail="Project not found in this workspace.")
     return list_runs(project_id, owner_id)
 
 
 @app.post("/upload", response_model=AnalyzeResponse, tags=["data"],
-          dependencies=[Depends(verify_api_key)])
+          dependencies=[Depends(require_auth)])
 @limiter.limit("30/minute")
 async def upload_dataset(request: Request, file: UploadFile = File(...)):
     project_id = request.headers.get("X-Project-Id")
-    owner_id = request.headers.get("X-Workspace-Id", "local-workspace")
+    owner_id = current_owner(request)
     if project_id and not get_project(project_id, owner_id):
         raise HTTPException(status_code=404, detail="Project not found in this workspace.")
 
@@ -396,14 +447,14 @@ async def upload_dataset(request: Request, file: UploadFile = File(...)):
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["ai"],
-          dependencies=[Depends(verify_api_key)])
+          dependencies=[Depends(require_auth)])
 @limiter.limit("60/minute")
 def chat_endpoint(request: Request, req: ChatRequest):
-    context = _get_session(req.session_id)
+    context = _get_session(req.session_id, current_owner(request))
     
     # Save user message
     session_label = context.get("filename", "New Conversation")
-    save_message(req.session_id, "user", req.message, session_label=session_label)
+    save_message(req.session_id, "user", req.message, session_label=session_label, owner_id=current_owner(request))
     
     response = generate_chat_response(req.message, req.history, context)
     response.charts = _chart_for_request(req.message, context)
@@ -442,23 +493,24 @@ def chat_endpoint(request: Request, req: ChatRequest):
     
     # Save assistant message
     metrics_dicts = [{"label": m.label, "value": m.value, "delta": m.delta} for m in response.metrics]
-    save_message(req.session_id, "assistant", response.content, actions=response.actions, metrics=metrics_dicts, session_label=session_label)
+    save_message(req.session_id, "assistant", response.content, actions=response.actions, metrics=metrics_dicts, session_label=session_label, owner_id=current_owner(request))
     
     return response
 
-@app.get("/chat/sessions", tags=["ai"], dependencies=[Depends(verify_api_key)])
-def list_sessions():
-    return get_sessions()
+@app.get("/chat/sessions", tags=["ai"], dependencies=[Depends(require_auth)])
+def list_sessions(request: Request):
+    return get_sessions(current_owner(request))
 
-@app.get("/chat/history/{session_id}", tags=["ai"], dependencies=[Depends(verify_api_key)])
-def get_session_history(session_id: str):
-    return get_history(session_id)
+@app.get("/chat/history/{session_id}", tags=["ai"], dependencies=[Depends(require_auth)])
+def get_session_history(request: Request, session_id: str):
+    _get_session(session_id, current_owner(request))
+    return get_history(session_id, current_owner(request))
 
 
-@app.post("/train", tags=["ml"], dependencies=[Depends(verify_api_key)])
+@app.post("/train", tags=["ml"], dependencies=[Depends(require_auth)])
 @limiter.limit("10/minute")
 async def train_model(request: Request, req: TrainRequest):
-    session = _get_session(req.session_id)
+    session = _get_session(req.session_id, current_owner(request))
     df = _read_dataframe(session["filepath"])
     try:
         loop = asyncio.get_event_loop()
@@ -497,9 +549,10 @@ async def train_model(request: Request, req: TrainRequest):
 
 
 @app.post("/predict", response_model=PredictResponse, tags=["ml"],
-          dependencies=[Depends(verify_api_key)])
+          dependencies=[Depends(require_auth)])
 @limiter.limit("120/minute")
 def predict(request: Request, req: PredictRequest):
+    _get_session(req.session_id, current_owner(request))
     exp_dir = _exports_dir(req.session_id)
     model_path = os.path.join(exp_dir, "model.joblib")
     if not os.path.exists(model_path):
@@ -535,9 +588,9 @@ def predict(request: Request, req: PredictRequest):
 
 
 @app.get("/export/model/{session_id}", tags=["export"],
-         dependencies=[Depends(verify_api_key)])
-def export_model(session_id: str):
-    _get_session(session_id)
+         dependencies=[Depends(require_auth)])
+def export_model(request: Request, session_id: str):
+    _get_session(session_id, current_owner(request))
     model_path = os.path.join(_exports_dir(session_id), "model.pkl")
     if not os.path.exists(model_path):
         model_path = os.path.join(_exports_dir(session_id), "model.joblib")
@@ -548,9 +601,9 @@ def export_model(session_id: str):
 
 
 @app.delete("/session/{session_id}", tags=["system"],
-            dependencies=[Depends(verify_api_key)])
-def delete_session(session_id: str):
-    session = store.get(session_id)
+            dependencies=[Depends(require_auth)])
+def delete_session(request: Request, session_id: str):
+    session = _get_session(session_id, current_owner(request))
     store.delete(session_id)
     if session:
         try:

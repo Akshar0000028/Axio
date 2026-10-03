@@ -17,3 +17,4 @@ redis>=5.0.0            # Redis client for persistent sessions
 aiofiles>=23.2.1        # Needed for StaticFiles serving
 werkzeug>=3.0.0         # Secure filename generation
 json-repair>=0.30.0     # Robust JSON parsing for LLM outputs
+PyJWT>=2.8,<3          # JWT access tokens
