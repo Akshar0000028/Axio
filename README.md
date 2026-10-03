@@ -1,4 +1,4 @@
-# Axio ML Platform — v2.1 (Production-Ready)
+# Axio ML Platform — v2.1 
 
 ## What's new in v2.1
 
